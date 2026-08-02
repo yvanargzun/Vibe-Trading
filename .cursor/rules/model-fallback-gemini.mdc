@@ -1,0 +1,17 @@
+---
+description: If OpenAI/ChatGPT quota or tokens are exhausted, switch to Gemini Flash already used in Synaptica.
+alwaysApply: true
+---
+
+# Model fallback: Gemini Flash
+
+When OpenAI / ChatGPT / Codex hits rate limits, quota errors, or "tokens exhausted":
+
+1. Prefer **Gemini Flash** (same stack as Synaptica).
+2. Config already used elsewhere:
+   - `AI_PROVIDER=gemini`
+   - `GEMINI_MODEL=gemini-3.1-flash-lite` (or `gemini-2.5-flash` / `gemini-2.0-flash` if that id fails)
+   - Key: `GEMINI_API_KEY` from Synaptica `.env` / Google AI Studio
+3. Via OpenRouter if needed: model id like `google/gemini-2.5-flash` or `google/gemini-2.0-flash-001` with existing `OPENROUTER_API_KEY`.
+4. Do **not** block the user asking them to buy OpenAI credits first — fall back and continue the task.
+5. Trading bots on Hetzner stay rule-based (no LLM per tick); this rule is for agent/coding/chat work.
