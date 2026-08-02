@@ -285,26 +285,77 @@ def get_account_snapshot(config: BinanceConfig | None = None) -> dict[str, Any]:
     }
 
 
+#: Quote/cash assets and Simple Earn share tokens must not enter the live
+#: exposure gate as unpriced "positions" — cash is funding, ``LD*`` is Earn.
+_CASH_ASSETS = frozenset(_QUOTE_ASSETS) | frozenset({"DAI", "USD"})
+
+
+def _is_trading_position_asset(asset: str) -> bool:
+    """Return whether ``asset`` is a spot trading holding (not cash / Earn)."""
+    code = (asset or "").strip().upper()
+    if not code or code in _CASH_ASSETS:
+        return False
+    # Binance Flexible Earn wraps the underlying as ``LD`` + asset (e.g. LDUSDT).
+    if code.startswith("LD") and len(code) > 2:
+        return False
+    return True
+
+
+def _asset_usdt_price(ex: Any, asset: str) -> float | None:
+    """Best-effort USDT last price for a spot asset; ``None`` if unavailable."""
+    code = (asset or "").strip().upper()
+    if not code:
+        return None
+    if code in _CASH_ASSETS:
+        return 1.0
+    for symbol in (f"{code}/USDT", f"{code}/USDC", f"{code}/BUSD"):
+        try:
+            ticker = ex.fetch_ticker(symbol)
+        except Exception:
+            continue
+        last = _to_float(_obj_get(ticker, "last")) if ticker is not None else None
+        if last is None:
+            last = _to_float(_obj_get(ticker, "close")) if ticker is not None else None
+        if last is not None and last > 0:
+            return last
+    return None
+
+
 def get_positions(config: BinanceConfig | None = None) -> dict[str, Any]:
     """Fetch holdings shaped as positions for the configured account.
 
     Binance spot has no positions; holdings are the non-zero balances. Each row
-    is ``{symbol, quantity, free, used}`` where ``symbol`` is the asset code and
-    ``quantity`` is the total balance.
+    is ``{symbol, quantity, free, used, price, market_value}`` for tradable
+    base assets only. Cash stables and Simple Earn (``LD*``) balances are
+    omitted so the live mandate exposure gate can price risk fail-closed
+    without treating wallet cash / Earn as open market exposure.
     """
     cfg = config or load_config()
     _assert_host(cfg)
     ex = _exchange(cfg)
     balance = ex.fetch_balance()
-    rows = [
-        {
-            "symbol": _obj_get(row, "asset"),
-            "quantity": _obj_get(row, "total"),
-            "free": _obj_get(row, "free"),
-            "used": _obj_get(row, "used"),
-        }
-        for row in _nonzero_balances(balance)
-    ]
+    rows: list[dict[str, Any]] = []
+    for row in _nonzero_balances(balance):
+        asset = str(_obj_get(row, "asset") or "").strip().upper()
+        if not _is_trading_position_asset(asset):
+            continue
+        qty = _to_float(_obj_get(row, "total"))
+        if qty is None or qty <= 0:
+            continue
+        price = _asset_usdt_price(ex, asset)
+        if price is None:
+            # Unpriceable dust must not poison the whole exposure check.
+            continue
+        rows.append(
+            {
+                "symbol": asset,
+                "quantity": qty,
+                "free": _obj_get(row, "free"),
+                "used": _obj_get(row, "used"),
+                "price": price,
+                "market_value": qty * price,
+            }
+        )
     return {
         "status": "ok",
         "profile": cfg.profile,
