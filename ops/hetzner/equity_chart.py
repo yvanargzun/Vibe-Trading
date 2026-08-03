@@ -7,11 +7,110 @@ import json
 import time
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
 
 MAX_POINTS = 1200
 MAX_MARKERS = 80
+MAX_TRADE_MARKERS_VIEW = 40
+TRADE_EVENTS_PATH = Path("/root/.vibe-trading/trade_events.jsonl")
+CHART_TZ = ZoneInfo("America/Mexico_City")
+MARKER_EDGE_PAD = timedelta(minutes=30)
+
+
+def _to_local(ts: float) -> datetime:
+    """Epoch seconds → America/Mexico_City aware datetime."""
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone(CHART_TZ)
+
+
+def _trade_event_to_marker(ev: dict[str, Any]) -> dict[str, Any] | None:
+    side = str(ev.get("side") or "")
+    result = ev.get("result")
+    mode = ev.get("mode") or ev.get("symbol")
+    if side == "buy":
+        kind = "buy"
+        label = f"BUY {ev.get('symbol') or ''}".strip()
+    elif side == "mode":
+        kind = "mode_change"
+        label = str(mode or "MODE").upper()[:8]
+    elif side == "sell":
+        if result == "win":
+            kind = "win"
+            label = f"WIN {ev.get('symbol') or ''}".strip()
+        elif result == "loss":
+            kind = "loss"
+            label = f"LOSS {ev.get('symbol') or ''}".strip()
+        else:
+            kind = "sell"
+            label = f"SELL {ev.get('symbol') or ''}".strip()
+    else:
+        return None
+    try:
+        ts = float(ev["ts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {
+        "ts": ts,
+        "kind": kind,
+        "equity": ev.get("equity"),
+        "label": label,
+        "price": ev.get("price"),
+        "bot": ev.get("bot"),
+        "symbol": ev.get("symbol"),
+    }
+
+
+def _load_trade_event_markers(limit: int = 80) -> list[dict[str, Any]]:
+    if not TRADE_EVENTS_PATH.exists():
+        return []
+    try:
+        lines = TRADE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    for line in lines[-limit:]:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        m = _trade_event_to_marker(ev)
+        if m:
+            out.append(m)
+    return out
+
+
+def _markers_for_chart(history_markers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge history markers + trade_events.jsonl; dedupe; keep last trade batch + goals."""
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, str]] = set()
+
+    def _add(m: dict[str, Any]) -> None:
+        try:
+            key = (
+                int(round(float(m["ts"]))),
+                str(m.get("kind") or ""),
+                str(m.get("symbol") or m.get("label") or ""),
+            )
+        except (KeyError, TypeError, ValueError):
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        merged.append(m)
+
+    for m in history_markers or []:
+        _add(m)
+    for m in _load_trade_event_markers(80):
+        _add(m)
+
+    trade_kinds = {"buy", "sell", "win", "loss", "mode_change"}
+    trades = [m for m in merged if str(m.get("kind")) in trade_kinds]
+    trades.sort(key=lambda m: float(m.get("ts") or 0))
+    trades = trades[-MAX_TRADE_MARKERS_VIEW:]
+    goals = [m for m in merged if str(m.get("kind")) in ("daily", "weekly")]
+    return goals + trades
 
 
 def _load(path: Path) -> dict:
@@ -138,7 +237,7 @@ def render_chart(
 
     doc = _load(history_path)
     points = list(doc.get("points") or [])
-    markers = list(doc.get("markers") or [])
+    markers = _markers_for_chart(list(doc.get("markers") or []))
     if len(points) < 1:
         points = [{"ts": time.time(), "equity": equity_now}]
     if len(points) == 1:
@@ -150,9 +249,21 @@ def render_chart(
             points[0],
         ]
 
-    xs = [datetime.fromtimestamp(float(p["ts"]), tz=timezone.utc) for p in points]
+    xs = [_to_local(float(p["ts"])) for p in points]
     ys = [float(p["equity"]) for p in points]
     start_eq = float(doc.get("start_equity") or ys[0])
+
+    # Expand X slightly so near-edge markers (e.g. recent RECAP) stay visible
+    x_left, x_right = xs[0], xs[-1]
+    for m in markers:
+        try:
+            mt = _to_local(float(m["ts"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+        if mt < x_left and (x_left - mt) <= MARKER_EDGE_PAD:
+            x_left = mt
+        if mt > x_right and (mt - x_right) <= MARKER_EDGE_PAD:
+            x_right = mt
 
     # Light, high-contrast, mobile-friendly
     bg = "#ffffff"
@@ -185,6 +296,7 @@ def render_chart(
         y_max = max(y_max, *guides)
     pad = max((y_max - y_min) * 0.12, abs(y_max) * 0.0015, 0.05)
     ax.set_ylim(y_min - pad, y_max + pad)
+    ax.set_xlim(x_left, x_right)
 
     # Goal guides (behind series)
     if day_open is not None:
@@ -250,17 +362,16 @@ def render_chart(
         "mode_change": ("#a855f7", "|", 0, "Cambio modo"),
     }
     seen = set()
-    # Only last 40 trade-related markers in view
     trade_kinds = {"buy", "sell", "win", "loss", "mode_change"}
-    trade_ms = [m for m in markers if str(m.get("kind")) in trade_kinds][-40:]
+    trade_ms = [m for m in markers if str(m.get("kind")) in trade_kinds][-MAX_TRADE_MARKERS_VIEW:]
     goal_ms = [m for m in markers if str(m.get("kind")) in ("daily", "weekly")]
     for m in goal_ms + trade_ms:
         try:
-            mt = datetime.fromtimestamp(float(m["ts"]), tz=timezone.utc)
+            mt = _to_local(float(m["ts"]))
             me = float(m.get("equity") or equity_now)
         except (TypeError, ValueError, KeyError):
             continue
-        if mt < xs[0] or mt > xs[-1]:
+        if mt < x_left or mt > x_right:
             continue
         kind = str(m.get("kind") or "")
         color, mark, size, legend = kind_style.get(kind, ("#dc2626", "*", 100, kind))
@@ -269,6 +380,8 @@ def render_chart(
             lab = legend if legend not in seen else None
             if lab:
                 seen.add(legend)
+                # Dummy artist so "Cambio modo" appears in legend
+                ax.plot([], [], color=color, linestyle="--", linewidth=1.2, label=lab)
             ax.text(
                 mt,
                 y_max - pad * 0.15,
@@ -299,6 +412,7 @@ def render_chart(
     delta = equity_now - start_eq
     sign = "+" if delta >= 0 else ""
     pct = (delta / start_eq * 100.0) if start_eq else 0.0
+    now_local = _to_local(time.time()).strftime("%H:%M")
 
     ax.set_title(
         f"[{venue_tag}]  Capital  ·  inicio {_fmt_money(start_eq)}  →  ahora {_fmt_money(equity_now)}  ({sign}{pct:.2f}%)",
@@ -316,14 +430,18 @@ def render_chart(
     ax.spines["bottom"].set_color(grid_c)
     ax.grid(True, axis="y", color=grid_c, linewidth=0.9)
     ax.grid(False, axis="x")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%H:%M"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m\n%H:%M", tz=CHART_TZ))
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _p: _fmt_money(v)))
 
-    # Footer summary (clear, no floating clutter)
+    # Footer summary (CDMX clock — not UTC)
     ax.text(
         0.0,
         -0.18,
-        f"Inicio {_fmt_money(start_eq)}   ·   Ahora {_fmt_money(equity_now)}   ·   Cambio {sign}{_fmt_money(delta)} ({sign}{pct:.2f}%)",
+        (
+            f"Inicio {_fmt_money(start_eq)}   ·   Ahora {_fmt_money(equity_now)}   ·   "
+            f"Cambio {sign}{_fmt_money(delta)} ({sign}{pct:.2f}%)   ·   "
+            f"Hora: Ciudad de Mexico ({now_local})"
+        ),
         transform=ax.transAxes,
         color=mute,
         fontsize=9.5,
