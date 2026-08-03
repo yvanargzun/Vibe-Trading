@@ -1,0 +1,1691 @@
+#!/usr/bin/env python3
+"""smart-fast-v6: fast realized profits + x2 cycle (Hetzner Binance Spot).
+
+Spec knobs and flow are fixed; see module constants below.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import sys as _sys
+_sys.path.insert(0, "/root/.vibe-trading")
+import dynamic_goals as goals
+import equity_chart as equity_chart
+
+AGENT = Path("/opt/vibe-trade/agent")
+sys.path.insert(0, str(AGENT))
+
+HOME = Path(os.environ.get("VIBE_TRADING_HOME", "/root/.vibe-trading"))
+ENV_PATH = HOME / ".env"
+STATE_PATH = HOME / "autotrade_state.json"
+LOG_PATH = HOME / "autotrade_loop.log"
+
+# --- KNOBS (smart-fast-v6 micro-defensive) ---
+ORDER_USD = float(os.environ.get("AUTOTRADE_ORDER_USD", "5.5"))
+TP = 0.030
+SL = 0.018
+TRAIL_ACT = 0.020
+TRAIL_GB = 0.010
+TIME_STOP_HOURS = 4.0
+MIN_EXIT_USD = 5.0
+MAX_BUYS_PER_DAY = 2
+MAX_OPEN_LEGS = 1
+MAX_MAJOR_BUYS_DAY = 1
+COOLDOWN_HOURS = 4.0
+POLL_OPEN_SEC = 180
+POLL_HUNT_SEC = 900
+POLL_IDLE_SEC = 900
+MIN_USDT = 5.0
+MIN_BUY_SCORE = 3.50
+MIN_BUY_SCORE_BEAR = 4.00
+DUST_USD = 0.50
+DAY_LOSS_HALT_PCT = -3.0
+STRATEGY_TAG = "smart-fast-v6"
+VENUE_TAG = "Binance"
+
+# ETH reserved for parallel vibe-eth-scalp; do not hunt or liquidate it here.
+MAJORS = {"BTC", "BNB"}
+FUND_ASSETS = ("ADA", "GALA", "POL", "DOGE", "S", "MANA", "SAND", "XRP", "LINK", "SOL")
+UNIVERSE = [
+    "BTCUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "LINKUSDT",
+]
+STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI", "USD"}
+SCALP_STATE_PATH = HOME / "eth_scalp_state.json"
+SCALP_USDT_RESERVE = 5.0  # only when scalper has position / active_float
+ORDER_LOCK_PATH = HOME / "order.lock"
+
+# Per-tick guards
+_tick_sold: set[str] = set()
+_tick_fund_sold: set[str] = set()
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_day() -> str:
+    return utc_now().date().isoformat()
+
+
+def utc_ts() -> str:
+    return utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def log(msg: str) -> None:
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n"
+    print(line, end="", flush=True)
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def load_env() -> dict[str, str]:
+    vals: dict[str, str] = {}
+    if not ENV_PATH.exists():
+        return vals
+    for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        vals[k.strip()] = v.strip().strip('"').strip("'")
+    return vals
+
+
+def tg(text: str) -> None:
+    """One Telegram bubble: novice text + equity chart (Binance)."""
+    try:
+        sys.path.insert(0, str(HOME))
+        from telegram_notify_prefs import should_notify
+
+        if not should_notify("vibe"):
+            return
+    except Exception as exc:  # noqa: BLE001
+        log(f"TG_PREFS_CHECK {exc}")
+
+    env = load_env()
+    token, chat = env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat:
+        return
+
+    try:
+        eq = book_equity()
+        st = load_state()
+        g = st.get("goals") or {}
+        snap = st.get("goal_snap") or {}
+        ok, _, _ = equity_chart.build_and_send(
+            history_path=HOME / "equity_history.json",
+            chart_path=HOME / "equity_alert_last.png",
+            token=token,
+            chat=chat,
+            venue_tag="Binance",
+            equity=eq,
+            text=text,
+            day_open=float(g.get("day_open_equity") or snap.get("day_open") or eq),
+            daily_target=float(g.get("daily_target_usd") or snap.get("daily_target") or 0),
+            week_open=float(g.get("week_open_equity") or snap.get("week_open") or eq),
+            weekly_target=float(g.get("weekly_target_usd") or snap.get("weekly_target") or 0),
+        )
+        if ok:
+            return
+    except Exception as exc:  # noqa: BLE001
+        log(f"TG_COMPOSITE_FAIL {exc}")
+
+    # Fallback: single text only
+    try:
+        sys.path.insert(0, str(HOME))
+        from telegram_notify_prefs import send_text
+
+        send_text(text, channel="vibe", dedupe=False)
+        return
+    except Exception as exc:  # noqa: BLE001
+        log(f"TG_PREFS_FALLBACK {exc}")
+    body = json.dumps(
+        {"chat_id": chat, "text": text[:900], "disable_web_page_preview": True},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            json.loads(r.read())
+    except Exception as exc:  # noqa: BLE001
+        log(f"TG_FAIL {exc}")
+
+
+ASSET_NAMES = {
+    "BTC": "Bitcoin",
+    "ETH": "Ethereum",
+    "BNB": "BNB",
+    "SOL": "Solana",
+    "XRP": "XRP",
+    "DOGE": "Dogecoin",
+    "ADA": "Cardano",
+    "LINK": "Chainlink",
+}
+
+
+def asset_label(base: str) -> str:
+    name = ASSET_NAMES.get(base, base)
+    return f"{name} ({base})" if name != base else base
+
+
+def _daily_cap() -> tuple[int, int]:
+    from src.live.daily_count import read_daily_count
+    from src.live.mandate.store import load_mandate
+
+    mandate = load_mandate("binance")
+    cap = mandate.hard_caps.max_trades_per_day if mandate else 3
+    return read_daily_count("binance"), cap
+
+
+def _progress_lines(state: dict | None = None) -> list[str]:
+    st = state if state is not None else load_state()
+    eq = book_equity()
+    goals.ensure_goals(st, eq, venue="binance")
+    save_state(st)
+    return goals.progress_lines(st, eq)
+
+
+def sell_motive(kind: str, emergency: bool) -> str:
+    motives = {
+        "tp": "cobro ganancia automatica",
+        "sl": "corto perdidas para no perder mas",
+        "trail": "protegio ganancia cuando empeco a bajar",
+        "time": "no se movio a tiempo; libero el dinero",
+        "rotate": "redujo posiciones para no tener demasiadas a la vez",
+    }
+    base = motives.get(kind, "cerro la posicion segun las reglas")
+    if emergency:
+        return f"dia de trades lleno; igual cerro ({base})"
+    return base
+
+
+def format_buy_tg(
+    *,
+    base: str,
+    usd: float,
+    topup: bool = False,
+    state: dict | None = None,
+) -> str:
+    daily, cap = _daily_cap()
+    title = "COMPRA extra" if topup else "COMPRA"
+    if topup:
+        motivo = (
+            f"aumento una posicion chica de {asset_label(base)} "
+            "para luego poder venderla (Binance pide minimo ~$5)"
+        )
+    else:
+        motivo = f"el sistema eligio {asset_label(base)} entre las mejores opciones de ahora"
+    lines = [
+        f"[{VENUE_TAG}] {title} · {asset_label(base)}",
+        f"Pague unos ${usd:.2f}",
+        f"Por que: {motivo}",
+        f"Trades del dia: {daily}/{cap}",
+        *_progress_lines(state),
+        (
+            f"Siguiente: espera; el bot intentara vender con ganancia pequena "
+            f"(~{TP * 100:.1f}%) o cortar si baja (~{SL * 100:.1f}%)"
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def format_sell_tg(
+    *,
+    base: str,
+    usd: float,
+    pnl_pct: float,
+    kind: str,
+    emergency: bool = False,
+    state: dict | None = None,
+) -> str:
+    daily, cap = _daily_cap()
+    pnl_usd = usd * pnl_pct
+    sign = "+" if pnl_usd >= 0 else ""
+    title = "VENTA urgente" if emergency else "VENTA"
+    result = f"{sign}${pnl_usd:.2f} ({sign}{pnl_pct * 100:.1f}%) — {sell_motive(kind, emergency)}"
+    left = cap - daily
+    if left > 0:
+        nxt = "puede buscar otra compra si quedan trades y hay buena oportunidad"
+    else:
+        nxt = "hoy ya no quedan trades; el bot sigue vigilando hasta manana"
+    lines = [
+        f"[{VENUE_TAG}] {title} · {asset_label(base)}",
+        "Volvio dinero a USDT",
+        f"Resultado: {result}",
+        f"Trades del dia: {daily}/{cap}",
+        *_progress_lines(state),
+        f"Siguiente: {nxt}",
+    ]
+    return "\n".join(lines)
+
+
+def format_double_tg(*, old_base: float, new_eq: float) -> str:
+    return "\n".join(
+        [
+            f"[{VENUE_TAG}] META LEJANA · duplicaste",
+            f"Pasaste de ${old_base:.2f} a ${new_eq:.2f}",
+            "El bot reinicia el objetivo: ahora busca duplicar otra vez desde este nuevo total.",
+            "No tienes que hacer nada.",
+        ]
+    )
+
+
+def format_error_tg(exc: str) -> str:
+    low = exc.lower()
+    if "notional" in low:
+        detalle = "Binance rechazo el monto (minimo suele ser ~$5)"
+    elif "usdt" in low or "insufficient" in low or "balance" in low:
+        detalle = "faltaba USDT libre en Spot"
+    elif "halt" in low:
+        detalle = "el trading esta pausado (halt)"
+    elif "mandate" in low or "denied" in low or "blocked" in low:
+        detalle = "la operacion choco con un limite de seguridad"
+    else:
+        detalle = (exc or "error desconocido")[:120]
+    return "\n".join(
+        [
+            f"[{VENUE_TAG}] AVISO · no se pudo completar la operacion",
+            f"Detalle simple: {detalle}",
+            "El bot reintentara en el proximo ciclo. No tienes que hacer nada.",
+        ]
+    )
+
+
+def http_get(url: str):
+    with urllib.request.urlopen(url, timeout=20) as r:
+        return json.loads(r.read())
+
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def save_state(doc: dict) -> None:
+    STATE_PATH.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+
+def ensure_buy_counters(state: dict) -> dict:
+    day = utc_day()
+    if state.get("buys_date") != day:
+        state["buys_date"] = day
+        state["buys_today"] = 0
+        state["major_buys_today"] = 0
+        save_state(state)
+    state.setdefault("buys_today", 0)
+    state.setdefault("major_buys_today", 0)
+    return state
+
+
+def note_buy(state: dict, base: str) -> None:
+    ensure_buy_counters(state)
+    state["buys_today"] = int(state.get("buys_today") or 0) + 1
+    if base in MAJORS:
+        state["major_buys_today"] = int(state.get("major_buys_today") or 0) + 1
+    save_state(state)
+
+
+def sma(xs: list[float], n: int) -> float | None:
+    if len(xs) < n:
+        return None
+    return sum(xs[-n:]) / n
+
+
+def ema(xs: list[float], n: int) -> float | None:
+    if len(xs) < n:
+        return None
+    k = 2 / (n + 1)
+    v = sum(xs[:n]) / n
+    for x in xs[n:]:
+        v = x * k + v * (1 - k)
+    return v
+
+
+def rsi(closes: list[float], n: int = 14) -> float:
+    if len(closes) < n + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    ag = sum(gains[-n:]) / n
+    al = sum(losses[-n:]) / n
+    if al <= 1e-12:
+        return 100.0
+    return 100 - (100 / (1 + ag / al))
+
+
+def atr_pct(klines: list, n: int = 14) -> float:
+    if len(klines) < n + 1:
+        return 0.02
+    trs = []
+    for i in range(1, len(klines)):
+        h = float(klines[i][2])
+        l = float(klines[i][3])
+        pc = float(klines[i - 1][4])
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    return (sum(trs[-n:]) / n) / max(float(klines[-1][4]), 1e-12)
+
+
+def book_equity() -> float:
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    acc = bn.get_account_snapshot(cfg)
+    total = 0.0
+    for b in acc.get("balances", []) or []:
+        raw = str(b.get("asset") or "")
+        qty = float(b.get("total") or 0)
+        if qty <= 0:
+            continue
+        asset = raw[2:] if raw.startswith("LD") and len(raw) > 2 else raw
+        if asset in STABLES:
+            total += qty
+            continue
+        try:
+            px = float(http_get(f"https://api.binance.com/api/v3/ticker/price?symbol={asset}USDT")["price"])
+        except Exception:
+            continue
+        total += qty * px
+    return total
+
+
+def free_usdt() -> float:
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    acc = bn.get_account_snapshot(cfg)
+    for b in acc.get("balances", []) or []:
+        if str(b.get("asset") or "") == "USDT":
+            return float(b.get("free") or 0)
+    return 0.0
+
+
+def scalp_reserved_usdt() -> float:
+    """USDT claimed by ETH scalper — only while in play (position / active float).
+
+    Idle/dead scalper must not freeze ~$5 that v6 needs.
+    """
+    if not SCALP_STATE_PATH.exists():
+        return 0.0
+    try:
+        st = json.loads(SCALP_STATE_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return 0.0
+    has_pos = bool(st.get("position"))
+    active = bool(st.get("active_float"))
+    regime = str(st.get("last_regime") or "")
+    last_fill = float(st.get("last_fill_ts") or 0)
+    if has_pos:
+        return max(float(st.get("reserved_usdt") or 0), SCALP_USDT_RESERVE)
+    if not active:
+        return 0.0
+    # Flat but float flag stuck: release when dead or idle >30m
+    if regime == "dead" or (last_fill and (time.time() - last_fill) > 1800) or not last_fill:
+        return 0.0
+    return max(float(st.get("reserved_usdt") or 0), SCALP_USDT_RESERVE)
+
+
+def usable_usdt_for_v6() -> float:
+    return max(0.0, free_usdt() - scalp_reserved_usdt())
+
+
+def with_order_lock(timeout: float = 45.0):
+    """Simple flock-style lock shared with vibe-eth-scalp."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        ORDER_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.time() + timeout
+        while True:
+            try:
+                fd = os.open(str(ORDER_LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                break
+            except FileExistsError:
+                if time.time() >= deadline:
+                    # stale lock salvage
+                    try:
+                        age = time.time() - ORDER_LOCK_PATH.stat().st_mtime
+                        if age > 120:
+                            ORDER_LOCK_PATH.unlink(missing_ok=True)
+                            continue
+                    except OSError:
+                        pass
+                    raise TimeoutError("order.lock busy")
+                time.sleep(0.25)
+        try:
+            yield
+        finally:
+            try:
+                ORDER_LOCK_PATH.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return _cm()
+
+
+def spot_holdings() -> dict[str, dict[str, float]]:
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    ex = bn._exchange(cfg)
+    bal = ex.fetch_balance()
+    out: dict[str, dict[str, float]] = {}
+    for asset, qty in (bal.get("free") or {}).items():
+        a = str(asset)
+        q = float(qty or 0)
+        if q <= 0 or a in STABLES or a.startswith("LD"):
+            continue
+        try:
+            px = float(http_get(f"https://api.binance.com/api/v3/ticker/price?symbol={a}USDT")["price"])
+        except Exception:
+            continue
+        usd = q * px
+        if usd < 0.05:
+            continue
+        out[a] = {"qty": q, "px": px, "usd": usd}
+    return out
+
+
+def flexible_positions() -> list[dict]:
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    ex = bn._exchange(cfg)
+    try:
+        data = ex.request("simple-earn/flexible/position", "sapi", "GET", {"size": 100})
+    except Exception as exc:  # noqa: BLE001
+        log(f"POS_FAIL {exc}")
+        return []
+    return list(data.get("rows") or [])
+
+
+def redeem_flexible(asset: str, amount: float | None = None, redeem_all: bool = False) -> bool:
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    ex = bn._exchange(cfg)
+    rows = [r for r in flexible_positions() if str(r.get("asset") or "").upper() == asset.upper()]
+    if not rows:
+        return False
+    row = rows[0]
+    if not row.get("canRedeem", True):
+        log(f"REDEEM_LOCKED {asset}")
+        return False
+    product_id = row.get("productId")
+    avail = float(row.get("totalAmount") or 0)
+    if avail <= 0 or not product_id:
+        return False
+    params: dict = {"productId": product_id}
+    if redeem_all or amount is None or float(amount) >= avail * 0.999:
+        params["redeemAll"] = True
+    else:
+        qty = min(float(amount), avail)
+        params["amount"] = f"{qty:.8f}".rstrip("0").rstrip(".")
+    try:
+        ex.request("simple-earn/flexible/redeem", "sapi", "POST", params)
+        log(f"REDEEM_OK {asset} {params}")
+        time.sleep(5)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log(f"REDEEM_FAIL {asset} {exc}")
+        return False
+
+
+def dust_to_bnb(only_assets: list[str] | None = None, max_usd: float = 1.0) -> bool:
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    ex = bn._exchange(cfg)
+    bal = ex.fetch_balance()
+    assets: list[str] = []
+    for asset, qty in (bal.get("free") or {}).items():
+        a = str(asset)
+        if a in ("USDT", "BNB") or a.startswith("LD"):
+            continue
+        if only_assets is not None and a not in only_assets:
+            continue
+        if float(qty or 0) <= 0:
+            continue
+        try:
+            px = float(http_get(f"https://api.binance.com/api/v3/ticker/price?symbol={a}USDT")["price"])
+            usd = float(qty) * px
+        except Exception:
+            usd = 0.0
+        if usd < 0.001 or usd >= max_usd:
+            continue
+        assets.append(a)
+    if not assets:
+        return False
+    params = {"timestamp": int(time.time() * 1000), "recvWindow": 60000}
+    query = urllib.parse.urlencode(params) + "".join(
+        f"&asset={urllib.parse.quote(a)}" for a in assets
+    )
+    sig = hmac.new(cfg.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    url = f"https://api.binance.com/sapi/v1/asset/dust?{query}&signature={sig}"
+    req = urllib.request.Request(
+        url, data=b"", method="POST", headers={"X-MBX-APIKEY": cfg.api_key}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+        log(f"DUST_OK assets={assets} transferred={data.get('totalTransfered')}")
+        time.sleep(2)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log(f"DUST_FAIL {exc}")
+        return False
+
+
+def market_sell_raw(asset: str, need_usd: float | None = None, sell_all: bool = False) -> bool:
+    """Raw market sell (funding / emergency). Does NOT consume mandate daily count."""
+    from src.trading.connectors.binance import sdk as bn
+
+    if asset in _tick_sold or asset in _tick_fund_sold:
+        return False
+    cfg = bn.load_config()
+    ex = bn._exchange(cfg)
+    symbol = f"{asset}/USDT"
+    try:
+        ex.load_markets()
+        bal = ex.fetch_balance()
+        spot_free = float((bal.get("free") or {}).get(asset) or 0)
+        if spot_free <= 0:
+            return False
+        px = float(http_get(f"https://api.binance.com/api/v3/ticker/price?symbol={asset}USDT")["price"])
+        if px <= 0:
+            return False
+        if sell_all or need_usd is None:
+            qty = spot_free
+        else:
+            qty = min(spot_free, max(need_usd, MIN_EXIT_USD) / px)
+            if qty * px < MIN_EXIT_USD * 0.999:
+                qty = spot_free
+        if spot_free * px < DUST_USD:
+            log(f"FUND_SELL_SKIP {asset} dust_usd={spot_free * px:.4f}")
+            _tick_fund_sold.add(asset)
+            return False
+        qty = float(ex.amount_to_precision(symbol, qty))
+        try:
+            min_amt = float((ex.market(symbol).get("limits") or {}).get("amount", {}).get("min") or 0)
+        except Exception:
+            min_amt = 0.0
+        if min_amt and qty + 1e-12 < min_amt:
+            log(f"FUND_SELL_SKIP {asset} qty={qty} < min_amt={min_amt}")
+            _tick_fund_sold.add(asset)
+            return False
+        if qty <= 0 or qty * px < MIN_EXIT_USD * 0.99:
+            log(f"FUND_SELL_SKIP {asset} notional={qty * px:.4f}")
+            _tick_fund_sold.add(asset)
+            return False
+        order = ex.create_order(symbol, "market", "sell", qty)
+        log(f"FUND_SELL {asset} qty={qty} id={order.get('id')}")
+        _tick_fund_sold.add(asset)
+        time.sleep(2)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        log(f"FUND_SELL_FAIL {asset} {msg}")
+        # Don't thrash the same dust every tick
+        if "minimum amount" in msg.lower() or "precision" in msg.lower():
+            _tick_fund_sold.add(asset)
+        return False
+
+
+def ensure_spot_usdt(need: float, state: dict) -> float:
+    """Fund USDT without dumping tracked strategy legs when possible."""
+    free = usable_usdt_for_v6()
+    if free >= need:
+        return free_usdt()
+
+    protected = {
+        a
+        for a, meta in (state.get("positions") or {}).items()
+        if float((meta or {}).get("usd") or 0) >= MIN_EXIT_USD or float(meta.get("usd") or 0) >= 0.5
+    }
+    # Prefer protecting exitable legs strongly
+    hard_protect = {
+        a
+        for a, meta in (state.get("positions") or {}).items()
+        if float((meta or {}).get("usd") or 0) >= MIN_EXIT_USD
+    }
+    # Never liquidate ETH — owned by parallel eth scalper
+    hard_protect.add("ETH")
+
+    # 1) Earn USDT
+    for row in flexible_positions():
+        if str(row.get("asset") or "").upper() == "USDT":
+            redeem_flexible("USDT", redeem_all=True)
+            break
+    free = usable_usdt_for_v6()
+    if free >= need:
+        return free_usdt()
+
+    # 2) Dust true dust (<$1), then sell BNB only if not a hard-protected strategy leg
+    dust_to_bnb(max_usd=1.0)
+    if "BNB" not in hard_protect:
+        market_sell_raw("BNB", need_usd=need - usable_usdt_for_v6())
+    free = usable_usdt_for_v6()
+    if free >= need:
+        return free_usdt()
+
+    # 3) Redeem earn majors/alts then sell non-tracked (never ETH)
+    for asset in ("FDUSD",) + FUND_ASSETS + ("BTC", "BNB"):
+        free = usable_usdt_for_v6()
+        if free >= need:
+            return free_usdt()
+        redeem_flexible(asset, redeem_all=True)
+
+    holdings = spot_holdings()
+    # Sell non-tracked / non-hard-protected first
+    for asset, h in sorted(holdings.items(), key=lambda kv: kv[1]["usd"]):
+        free = usable_usdt_for_v6()
+        if free >= need:
+            return free_usdt()
+        if asset in hard_protect or asset == "ETH":
+            continue
+        if asset in _tick_sold:
+            continue
+        if h["usd"] < MIN_EXIT_USD:
+            continue
+        market_sell_raw(asset, need_usd=need - usable_usdt_for_v6())
+
+    free = usable_usdt_for_v6()
+    if free >= need:
+        return free_usdt()
+
+    # 4) Last resort: sell protected strategy legs (never ETH)
+    for asset in list(hard_protect):
+        free = usable_usdt_for_v6()
+        if free >= need:
+            break
+        if asset == "ETH" or asset in _tick_sold:
+            continue
+        log(f"FUND_SELL_LAST_RESORT {asset}")
+        market_sell_raw(asset, need_usd=need - usable_usdt_for_v6())
+
+    return free_usdt()
+
+
+def detect_regime() -> dict[str, Any]:
+    kl = http_get("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=80")
+    closes = [float(c[4]) for c in kl]
+    t = http_get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT")
+    chg24 = float(t["priceChangePercent"])
+    e12, e26, s50 = ema(closes, 12), ema(closes, 26), sma(closes, 50)
+    last = closes[-1]
+    atr = atr_pct(kl)
+    if e12 is None or e26 is None or s50 is None:
+        return {"regime": "chop", "btc_chg24": chg24, "atr": atr, "last": last}
+    bullish = e12 > e26 and last > s50 and chg24 > -1.5
+    bearish = e12 < e26 and last < s50 and chg24 < -1.0
+    if bullish:
+        regime = "bull"
+    elif bearish:
+        regime = "bear"
+    else:
+        regime = "chop"
+    return {"regime": regime, "btc_chg24": chg24, "atr": atr, "last": last}
+
+
+def analyze_symbol(symbol: str, btc_chg24: float, regime: str) -> dict[str, Any] | None:
+    try:
+        t = http_get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}")
+        kl1h = http_get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=60")
+        kl15 = http_get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=60")
+    except Exception:
+        return None
+    closes = [float(c[4]) for c in kl1h]
+    c15 = [float(c[4]) for c in kl15]
+    last = float(t["lastPrice"])
+    chg = float(t["priceChangePercent"])
+    vol = float(t["quoteVolume"])
+    r1 = rsi(closes, 14)
+    r15 = rsi(c15, 14)
+    e12, e26 = ema(closes, 12), ema(closes, 26)
+    s20 = sma(closes, 20)
+    atr = atr_pct(kl1h)
+    rs = chg - btc_chg24
+    vols = [float(c[5]) for c in kl1h[-20:]]
+    v_avg = sum(vols[:-1]) / max(len(vols) - 1, 1)
+    v_now = vols[-1] if vols else 0
+    vol_z = (v_now / v_avg) if v_avg > 0 else 1.0
+
+    score = 0.0
+    reasons: list[str] = []
+    score += min(vol / 8e8, 1.2)
+
+    if regime == "bull":
+        if 38 <= r1 <= 55 and last >= (s20 or last):
+            score += 1.6
+            reasons.append("bull_dip")
+        if rs > 1.0 and r1 < 68 and e12 and e26 and e12 >= e26:
+            score += 1.4
+            reasons.append("rs_leader")
+        if chg > 0 and r15 < 62:
+            score += 0.5
+    elif regime == "bear":
+        if r1 <= 32 and rs > -2.5:
+            score += 1.8
+            reasons.append("bear_oversold")
+        if r15 <= 30 and chg > -8:
+            score += 0.7
+        score -= 0.6
+    else:
+        if 35 <= r1 <= 48:
+            score += 1.5
+            reasons.append("chop_mr")
+        if abs(rs) < 0.8 and 40 <= r1 <= 55:
+            score += 0.4
+        if r1 > 65:
+            score -= 1.0
+
+    if e12 and e26:
+        if e12 > e26:
+            score += 0.55 if regime != "bear" else 0.15
+        else:
+            score -= 0.35 if regime == "bear" else 0.15
+
+    if vol_z >= 1.35:
+        score += 0.45
+        reasons.append("vol_exp")
+    elif vol_z < 0.7:
+        score -= 0.25
+
+    if 0.008 <= atr <= 0.035:
+        score += 0.35
+    elif atr > 0.055:
+        score -= 0.7
+
+    base = symbol[:-4]
+    if base in MAJORS and regime == "bull":
+        score += 0.25
+    if base not in MAJORS and regime == "bull" and rs > 2.0:
+        score += 0.55
+        reasons.append("alt_beta")
+
+    if r1 >= 72 and regime != "bear":
+        return None
+    if chg < -9:
+        return None
+
+    return {
+        "symbol": symbol,
+        "base": base,
+        "last": last,
+        "chg": chg,
+        "rsi": r1,
+        "rs": rs,
+        "atr": atr,
+        "score": score,
+        "reasons": reasons,
+    }
+
+
+def rank_candidates(regime_info: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for s in UNIVERSE:
+        row = analyze_symbol(s, float(regime_info["btc_chg24"]), regime_info["regime"])
+        if row:
+            rows.append(row)
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows
+
+
+def parse_opened_ts(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def sync_positions(state: dict) -> dict[str, dict[str, float]]:
+    holdings = spot_holdings()
+    positions = dict(state.get("positions") or {})
+    for asset in list(positions.keys()):
+        if asset not in holdings or holdings[asset]["usd"] < 0.4:
+            positions.pop(asset, None)
+    for asset, h in holdings.items():
+        prev = positions.get(asset) or {}
+        entry = float(prev.get("entry") or 0)
+        peak = float(prev.get("peak") or 0)
+        if entry <= 0:
+            entry = h["px"]
+        peak = max(peak, h["px"], entry)
+        positions[asset] = {
+            "entry": entry,
+            "peak": peak,
+            "qty": h["qty"],
+            "usd": round(h["usd"], 4),
+            "opened_ts": prev.get("opened_ts") or utc_ts(),
+            "score": prev.get("score"),
+            "regime": prev.get("regime"),
+        }
+    state["positions"] = positions
+    save_state(state)
+    return holdings
+
+
+def fill_average(result: dict, fallback: float) -> float:
+    for key in ("average", "avgPrice", "price"):
+        try:
+            v = float(result.get(key) or 0)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    info = result.get("info") or {}
+    if isinstance(info, dict):
+        for key in ("avgPrice", "price", "cummulativeQuoteQty"):
+            try:
+                v = float(info.get(key) or 0)
+                if key == "cummulativeQuoteQty":
+                    filled = float(info.get("executedQty") or 0)
+                    if filled > 0 and v > 0:
+                        return v / filled
+                elif v > 0:
+                    return v
+            except (TypeError, ValueError):
+                pass
+    return fallback
+
+
+def order_succeeded(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("denied") or result.get("breach") or result.get("status") == "blocked":
+        return False
+    status = str(result.get("status") or "").lower()
+    if status in ("error", "rejected", "denied", "failed", "blocked"):
+        return False
+    if result.get("error"):
+        return False
+    outcome = str((result.get("live_action") or {}).get("outcome") or "").lower()
+    if outcome in ("error", "rejected", "denied"):
+        return False
+    return status in ("closed", "filled", "ok", "open") or bool(result.get("id"))
+
+
+def place_gate_order(
+    pair: str,
+    side: str,
+    *,
+    notional: float | None = None,
+    quantity: float | None = None,
+) -> dict:
+    from src.trading.connectors.binance import sdk as bn
+    from src.live.enforcement import OrderIntent
+    from src.live.mandate.model import InstrumentType, AssetClass
+    from src.live.sdk_order_gate import execute_live_order
+
+    cfg = bn.load_config()
+    notional_usd = notional
+    if notional_usd is None and quantity is not None:
+        base = pair.split("/")[0]
+        px = float(http_get(f"https://api.binance.com/api/v3/ticker/price?symbol={base}USDT")["price"])
+        notional_usd = quantity * px
+    intent = OrderIntent(
+        symbol=pair,
+        side=side,
+        notional_usd=float(notional_usd or 0),
+        quantity=quantity,
+        instrument_type=InstrumentType.CRYPTO,
+        asset_class=AssetClass.CRYPTO,
+    )
+    kwargs: dict[str, Any] = {"symbol": pair, "side": side, "order_type": "market"}
+    if quantity is not None:
+        kwargs["quantity"] = quantity
+    else:
+        kwargs["notional"] = notional
+    with with_order_lock():
+        return execute_live_order(
+            broker="binance",
+            connector_module=bn,
+            config=cfg,
+            intent=intent,
+            place_kwargs=kwargs,
+            session_id="autotrade-smart-fast-v6",
+        )
+
+
+def in_cooldown(state: dict, asset: str, *, allow_topup: bool = False) -> bool:
+    if allow_topup:
+        return False
+    cd = (state.get("cooldowns") or {}).get(asset)
+    if not cd:
+        return False
+    try:
+        until = datetime.strptime(cd, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return utc_now() < until
+
+
+def set_cooldown(state: dict, asset: str) -> None:
+    cds = dict(state.get("cooldowns") or {})
+    until = utc_now().timestamp() + COOLDOWN_HOURS * 3600
+    cds[asset] = datetime.fromtimestamp(until, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state["cooldowns"] = cds
+    save_state(state)
+
+
+MIN_HOLD_MINUTES = 25.0  # agent: no exit except SL before this
+
+
+def classify_exit(
+    asset: str,
+    h: dict[str, float],
+    meta: dict,
+    *,
+    rotate_down: bool = False,
+) -> dict[str, Any] | None:
+    if h["usd"] < MIN_EXIT_USD * 0.99:
+        return None
+    entry = float(meta.get("entry") or h["px"])
+    peak = max(float(meta.get("peak") or entry), h["px"])
+    pnl = (h["px"] / entry) - 1.0 if entry > 0 else 0.0
+    dd_from_peak = (h["px"] / peak) - 1.0 if peak > 0 else 0.0
+    opened = parse_opened_ts(meta.get("opened_ts"))
+    age_h = (utc_now() - opened).total_seconds() / 3600.0 if opened else 0.0
+    age_m = age_h * 60.0
+
+    reason = None
+    kind = None  # sl|tp|trail|time|rotate
+    if pnl <= -SL:
+        reason, kind = f"SL {pnl*100:.1f}%", "sl"
+    elif age_m < MIN_HOLD_MINUTES:
+        # hold gate: only hard SL may exit early
+        return None
+    elif pnl >= TP:
+        reason, kind = f"TP {pnl*100:.1f}%", "tp"
+    elif peak >= entry * (1 + TRAIL_ACT) and dd_from_peak <= -TRAIL_GB:
+        reason, kind = f"TRAIL {pnl*100:.1f}%", "trail"
+    elif age_h >= TIME_STOP_HOURS and pnl < 0.015:
+        reason, kind = f"TIME {age_h:.1f}h", "time"
+    elif rotate_down:
+        reason, kind = f"ROTATE {pnl*100:.1f}%", "rotate"
+
+    if not reason:
+        return None
+    return {
+        "asset": asset,
+        "qty": h["qty"],
+        "usd": h["usd"],
+        "pnl": pnl,
+        "reason": reason,
+        "kind": kind,
+        "peak": peak,
+        "entry": entry,
+    }
+
+
+def pick_exit(
+    state: dict,
+    holdings: dict[str, dict[str, float]],
+    *,
+    rotate_down: bool = False,
+    emergency_only: bool = False,
+) -> dict[str, Any] | None:
+    positions = state.get("positions") or {}
+    cands: list[dict[str, Any]] = []
+    for asset, h in holdings.items():
+        if asset in _tick_sold:
+            continue
+        meta = positions.get(asset) or {}
+        # persist peak
+        if meta:
+            meta["peak"] = max(float(meta.get("peak") or 0), h["px"])
+            meta["usd"] = h["usd"]
+            meta["qty"] = h["qty"]
+            positions[asset] = meta
+        exit_c = classify_exit(asset, h, meta, rotate_down=rotate_down)
+        if not exit_c:
+            continue
+        if emergency_only and exit_c["kind"] not in ("tp", "sl"):
+            continue
+        # priority rank
+        rank = {"sl": 4, "tp": 3, "trail": 2, "time": 1, "rotate": 0}.get(exit_c["kind"], 0)
+        # for rotate, prefer worst pnl
+        score = rank * 10 - (exit_c["pnl"] if exit_c["kind"] == "rotate" else 0)
+        exit_c["score"] = score
+        cands.append(exit_c)
+    state["positions"] = positions
+    save_state(state)
+    if not cands:
+        return None
+    cands.sort(key=lambda x: x["score"], reverse=True)
+    return cands[0]
+
+
+def precision_ok(pair: str, qty: float, px: float) -> float | None:
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    ex = bn._exchange(cfg)
+    ex.load_markets()
+    q = float(ex.amount_to_precision(pair, qty))
+    if q <= 0 or q * px < MIN_EXIT_USD * 0.99:
+        return None
+    return q
+
+
+def execute_sell(
+    state: dict,
+    exit_c: dict[str, Any],
+    *,
+    emergency: bool,
+) -> bool:
+    asset = exit_c["asset"]
+    if asset in _tick_sold or asset in _tick_fund_sold:
+        return False
+
+    # refetch
+    holdings = spot_holdings()
+    if asset not in holdings:
+        return False
+    h = holdings[asset]
+    pair = f"{asset}/USDT"
+    qty = precision_ok(pair, h["qty"], h["px"])
+    if qty is None:
+        log(f"EXIT_SKIP {asset} notional after precision < {MIN_EXIT_USD}")
+        return False
+
+    tag = "EMERGENCY_EXIT" if emergency else "STRATEGY_SELL"
+
+    log(f"{tag} {pair} qty={qty} {exit_c['reason']} pnl={exit_c['pnl']*100:.2f}%")
+    if emergency:
+        ok = market_sell_raw(asset, sell_all=True)
+        # market_sell_raw logs FUND_SELL; rewrite intent in log already via tag above
+        result = {"status": "ok"} if ok else {"status": "error"}
+        # avoid double fund tag confusion
+        if ok:
+            log(f"EMERGENCY_EXIT_OK {asset}")
+    else:
+        result = place_gate_order(pair, "sell", quantity=qty)
+
+    status = result.get("status") or result.get("denied_reason") or result.get("error") or result
+    log(f"{tag}_RESULT {pair} {status}")
+    if not order_succeeded(result) and not (emergency and result.get("status") == "ok"):
+        return False
+
+    _tick_sold.add(asset)
+    positions = dict(state.get("positions") or {})
+    positions.pop(asset, None)
+    state["positions"] = positions
+    set_cooldown(state, asset)
+    state["last_symbol"] = f"-{asset}"
+    recent = list(state.get("recent_symbols") or [])
+    recent.append(f"-{asset}")
+    state["recent_symbols"] = recent[-8:]
+    exits = list(state.get("exits") or [])
+    exits.append(
+        {
+            "ts": utc_ts(),
+            "asset": asset,
+            "reason": exit_c["reason"],
+            "kind": exit_c["kind"],
+            "pnl_pct": round(exit_c["pnl"] * 100, 2),
+            "emergency": emergency,
+        }
+    )
+    state["exits"] = exits[-30:]
+    save_state(state)
+    try:
+        import market_orchestrator as orch
+        import trade_events as te
+
+        te.record_trade_event(
+            bot="v6",
+            side="sell",
+            symbol=asset,
+            price=float(h["px"]),
+            usd=float(exit_c.get("usd") or h["usd"]),
+            mode=orch.current_mode(),
+            regime=str(state.get("regime") or ""),
+            pnl_pct=float(exit_c["pnl"]),
+            equity=book_equity(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"TRADE_EVENT_FAIL sell {exc}")
+    tg(
+        format_sell_tg(
+            base=asset,
+            usd=float(exit_c.get("usd") or h["usd"]),
+            pnl_pct=float(exit_c["pnl"]),
+            kind=str(exit_c.get("kind") or ""),
+            emergency=emergency,
+            state=state,
+        )
+    )
+    return True
+
+
+def try_exits(state: dict) -> bool:
+    from src.live.daily_count import read_daily_count
+    from src.live.halt import halt_flag_set
+
+    if halt_flag_set("binance") or halt_flag_set(None):
+        log("HALTED")
+        return False
+
+    holdings = sync_positions(state)
+    positions = state.get("positions") or {}
+    tracked_legs = sum(
+        1
+        for a, h in holdings.items()
+        if h["usd"] >= 0.5 and (a in positions or h["usd"] >= MIN_EXIT_USD)
+    )
+    daily = read_daily_count("binance")
+    rotate = tracked_legs > MAX_OPEN_LEGS and daily < 3
+
+    if daily < 3:
+        exit_c = pick_exit(state, holdings, rotate_down=rotate, emergency_only=False)
+        if not exit_c:
+            return False
+        return execute_sell(state, exit_c, emergency=False)
+
+    # day full: emergency TP/SL only
+    exit_c = pick_exit(state, holdings, rotate_down=False, emergency_only=True)
+    if not exit_c:
+        return False
+    return execute_sell(state, exit_c, emergency=True)
+
+
+def try_consolidate(state: dict) -> bool:
+    """Top-up undersize legs via gate buy; dust true dust."""
+    from src.live.daily_count import read_daily_count
+    from src.live.halt import halt_flag_set
+
+    if halt_flag_set("binance") or halt_flag_set(None):
+        return False
+    try:
+        import market_orchestrator as orch
+
+        if not orch.allows_v6_buys():
+            return False
+    except Exception:
+        pass
+    ensure_buy_counters(state)
+    daily = read_daily_count("binance")
+    if daily >= 3 or int(state.get("buys_today") or 0) >= MAX_BUYS_PER_DAY:
+        # still allow dust
+        dust_to_bnb(max_usd=1.0)
+        return False
+
+    holdings = sync_positions(state)
+    undersize = [
+        (a, h)
+        for a, h in holdings.items()
+        if 0.5 <= h["usd"] < MIN_EXIT_USD
+    ]
+    if not undersize:
+        dust_to_bnb(max_usd=1.0)
+        return False
+
+    # Prefer topping the largest undersize first
+    undersize.sort(key=lambda x: x[1]["usd"], reverse=True)
+    asset, h = undersize[0]
+    # cooldown does NOT block top-up
+    free = ensure_spot_usdt(ORDER_USD, state)
+    if free < MIN_USDT:
+        log(f"CONSOLIDATE_NO_USDT free={free:.4f}")
+        dust_to_bnb(max_usd=1.0)
+        return False
+
+    pair = f"{asset}/USDT"
+    log(f"STRATEGY_BUY TOPUP {pair} ${ORDER_USD:.2f} from_usd={h['usd']:.2f}")
+    result = place_gate_order(pair, "buy", notional=ORDER_USD)
+    status = result.get("status") or result.get("error") or result
+    log(f"STRATEGY_BUY_RESULT {pair} {status}")
+    if not order_succeeded(result):
+        return False
+
+    avg = fill_average(result, h["px"])
+    meta = dict((state.get("positions") or {}).get(asset) or {})
+    old_entry = float(meta.get("entry") or h["px"])
+    old_usd = float(meta.get("usd") or h["usd"])
+    new_usd = old_usd + ORDER_USD
+    # VWAP-ish entry
+    entry = (old_entry * old_usd + avg * ORDER_USD) / max(new_usd, 1e-9)
+    meta.update(
+        {
+            "entry": entry,
+            "peak": max(float(meta.get("peak") or 0), avg, h["px"]),
+            "opened_ts": meta.get("opened_ts") or utc_ts(),
+            "usd": new_usd,
+        }
+    )
+    positions = dict(state.get("positions") or {})
+    positions[asset] = meta
+    state["positions"] = positions
+    note_buy(state, asset)
+    state["last_symbol"] = asset
+    save_state(state)
+    sync_positions(state)
+    tg(
+        format_buy_tg(
+            base=asset,
+            usd=ORDER_USD,
+            topup=True,
+            state=state,
+        )
+    )
+    return True
+
+
+def select_buy(
+    ranked: list[dict[str, Any]],
+    state: dict,
+    regime: str,
+    holdings: dict[str, dict[str, float]],
+) -> dict[str, Any] | None:
+    ensure_buy_counters(state)
+    if int(state.get("buys_today") or 0) >= MAX_BUYS_PER_DAY:
+        return None
+    min_score = MIN_BUY_SCORE_BEAR if regime == "bear" else MIN_BUY_SCORE
+    open_legs = sum(1 for a, h in holdings.items() if h["usd"] >= MIN_EXIT_USD * 0.9)
+    if open_legs >= MAX_OPEN_LEGS:
+        log(f"SKIP_BUY max open legs={open_legs}")
+        return None
+    major_buys = int(state.get("major_buys_today") or 0)
+    held_majors = sum(1 for a in holdings if a in MAJORS and holdings[a]["usd"] >= 3)
+
+    for row in ranked:
+        if row["score"] < min_score:
+            continue
+        base = row["base"]
+        if in_cooldown(state, base):
+            continue
+        if base in holdings and holdings[base]["usd"] >= 3.0:
+            continue
+        if base in MAJORS and major_buys >= MAX_MAJOR_BUYS_DAY:
+            continue
+        if held_majors >= 2 and base in MAJORS:
+            continue
+        if regime == "bear" and base not in ("BTC", "ETH") and row["score"] < min_score + 0.3:
+            continue
+        return row
+    return None
+
+
+def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
+    from src.live.daily_count import read_daily_count
+    from src.live.halt import halt_flag_set
+    from src.live.mandate.store import load_mandate
+
+    import market_orchestrator as orch
+    import trade_events as te
+
+    if halt_flag_set("binance") or halt_flag_set(None):
+        log("HALTED")
+        return False
+    mode = orch.current_mode()
+    if not orch.allows_v6_buys(mode):
+        feats = orch.load_mode().get("features") or {}
+        if float(feats.get("notional_frac") or 0) >= 0.40:
+            te.record_skip(
+                "SKIP_FEE_BUDGET",
+                bot="v6",
+                detail=f"frac={feats.get('notional_frac')}",
+                mode=mode,
+            )
+        else:
+            te.record_skip("SKIP_MODE", bot="v6", detail=f"mode={mode}", mode=mode)
+        log(f"SKIP_MODE buy blocked mode={mode}")
+        return False
+    mandate = load_mandate("binance")
+    if mandate is None:
+        log("NO_MANDATE")
+        return False
+    ensure_buy_counters(state)
+    daily = read_daily_count("binance")
+    cap = mandate.hard_caps.max_trades_per_day
+    if daily >= cap:
+        log(f"DAY_FULL {daily}/{cap}")
+        return False
+    if int(state.get("buys_today") or 0) >= MAX_BUYS_PER_DAY:
+        log(f"BUYS_FULL {state['buys_today']}/{MAX_BUYS_PER_DAY}")
+        return False
+
+    notional = min(ORDER_USD, float(mandate.hard_caps.max_order_notional_usd))
+    holdings = sync_positions(state)
+    ranked = rank_candidates(regime_info)
+    if ranked:
+        top = ranked[0]
+        log(
+            f"RANK1 {top['base']} score={top['score']:.2f} rsi={top['rsi']:.0f} "
+            f"rs={top['rs']:+.1f} {','.join(top['reasons']) or '-'}"
+        )
+    pick = select_buy(ranked, state, regime_info["regime"], holdings)
+    if not pick:
+        te.record_skip(
+            "SKIP_SCORE",
+            bot="v6",
+            detail=f"regime={regime_info['regime']}",
+            mode=mode,
+        )
+        log(f"NO_QUALITY_BUY regime={regime_info['regime']} (cash ok)")
+        return False
+
+    # Don't burn fee/funding attempts when usable USDT is empty after scalper reserve
+    if usable_usdt_for_v6() < MIN_USDT * 0.5:
+        free = ensure_spot_usdt(notional, state)
+        if usable_usdt_for_v6() < MIN_USDT:
+            te.record_skip(
+                "SKIP_NO_BANKROLL",
+                bot="v6",
+                detail=f"usable={usable_usdt_for_v6():.2f}",
+                mode=mode,
+            )
+            log(f"NO_USDT usable={usable_usdt_for_v6():.4f} free={free:.4f}")
+            return False
+    else:
+        free = ensure_spot_usdt(notional, state)
+        if free < MIN_USDT and usable_usdt_for_v6() < MIN_USDT:
+            te.record_skip(
+                "SKIP_NO_BANKROLL",
+                bot="v6",
+                detail=f"free={free:.2f}",
+                mode=mode,
+            )
+            log(f"NO_USDT free={free:.4f}")
+            return False
+
+    if usable_usdt_for_v6() < MIN_USDT:
+        te.record_skip(
+            "SKIP_NO_BANKROLL",
+            bot="v6",
+            detail=f"usable={usable_usdt_for_v6():.2f}",
+            mode=mode,
+        )
+        log(f"SKIP_BUY low_usable_usdt={usable_usdt_for_v6():.4f}")
+        return False
+
+    pair = f"{pick['base']}/USDT"
+    log(
+        f"STRATEGY_BUY {pair} ${notional:.2f} score={pick['score']:.2f} "
+        f"regime={regime_info['regime']} mode={mode} reasons={pick['reasons']}"
+    )
+    result = place_gate_order(pair, "buy", notional=notional)
+    status = result.get("status") or result.get("denied_reason") or result.get("error") or result
+    log(f"STRATEGY_BUY_RESULT {pair} {status}")
+    if not order_succeeded(result):
+        return False
+
+    avg = fill_average(result, pick["last"])
+    positions = dict(state.get("positions") or {})
+    positions[pick["base"]] = {
+        "entry": avg,
+        "peak": avg,
+        "qty": 0,
+        "usd": notional,
+        "opened_ts": utc_ts(),
+        "score": pick["score"],
+        "regime": regime_info["regime"],
+    }
+    state["positions"] = positions
+    note_buy(state, pick["base"])
+    state["last_symbol"] = pick["base"]
+    recent = list(state.get("recent_symbols") or [])
+    recent.append(pick["base"])
+    state["recent_symbols"] = recent[-8:]
+    save_state(state)
+    sync_positions(state)
+    try:
+        te.record_trade_event(
+            bot="v6",
+            side="buy",
+            symbol=pick["base"],
+            price=float(avg),
+            usd=float(notional),
+            mode=mode,
+            regime=str(regime_info.get("regime") or ""),
+            equity=book_equity(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(f"TRADE_EVENT_FAIL buy {exc}")
+    tg(
+        format_buy_tg(
+            base=pick["base"],
+            usd=notional,
+            topup=False,
+            state=state,
+        )
+    )
+    return True
+
+
+def check_double(state: dict) -> None:
+    eq = book_equity()
+    goals.ensure_goals(state, eq, venue="binance")
+    state["equity"] = round(eq, 4)
+    snap = goals.goal_snapshot(state, eq)
+    state["goal_snap"] = snap
+    save_state(state)
+    log(
+        f"GOALS day={snap['day_pnl']:+.2f}/{snap['daily_target']:.2f} "
+        f"({snap['daily_prog']:.0f}%) week={snap['week_pnl']:+.2f}/{snap['weekly_target']:.2f} "
+        f"profile={snap['profile']}"
+    )
+    for event in goals.evaluate_hits(state, eq):
+        save_state(state)
+        try:
+            hist = Path("/root/.vibe-trading/equity_history.json")
+            equity_chart.record_goal_marker(
+                hist,
+                kind=str(event["kind"]),
+                equity=eq,
+                label="Meta dia" if event["kind"] == "daily" else "Meta semana",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log(f"GOAL_MARKER_FAIL {exc}")
+        # Single bubble: text + chart (via tg → build_and_send)
+        tg(goals.format_goal_hit_tg("Binance", event, eq))
+        log(f"GOAL_HIT {event['kind']} pnl={event['pnl']:.2f}")
+    base = float(state.get("double_baseline") or 0)
+    if base <= 0:
+        state["double_baseline"] = round(eq, 4)
+        save_state(state)
+        log(f"BASELINE_SET {eq:.4f}")
+        return
+    state["progress_to_double"] = round(eq / base, 4) if base else 0
+    save_state(state)
+    if eq >= base * 2:
+        tg(format_double_tg(old_base=base, new_eq=eq))
+        state["double_baseline"] = round(eq, 4)
+        state["doubles"] = int(state.get("doubles") or 0) + 1
+        save_state(state)
+        log(f"DOUBLED soft -> new baseline {eq:.4f}")
+
+
+def has_exitable_leg(state: dict) -> bool:
+    holdings = spot_holdings()
+    return any(h["usd"] >= MIN_EXIT_USD for h in holdings.values())
+
+
+def tick() -> None:
+    global _tick_sold, _tick_fund_sold
+    _tick_sold = set()
+    _tick_fund_sold = set()
+
+    from src.live.daily_count import read_daily_count
+    from src.live.halt import halt_flag_set
+    from src.live.mandate.store import load_mandate
+
+    state = load_state()
+    # Preserve baseline; tag strategy
+    state["strategy"] = STRATEGY_TAG
+    ensure_buy_counters(state)
+    save_state(state)
+
+    if halt_flag_set("binance") or halt_flag_set(None):
+        log("HALTED skip tick")
+        return
+
+    try:
+        import market_orchestrator as orch
+
+        orch.evaluate_and_update(notify=True)
+    except Exception as exc:  # noqa: BLE001
+        log(f"ORCH_FAIL {exc}")
+
+    check_double(state)
+    mandate = load_mandate("binance")
+    cap = mandate.hard_caps.max_trades_per_day if mandate else 3
+
+    try:
+        regime_info = detect_regime()
+    except Exception as exc:  # noqa: BLE001
+        log(f"REGIME_FAIL {exc}")
+        regime_info = {"regime": "chop", "btc_chg24": 0.0, "atr": 0.02}
+
+    state["regime"] = regime_info["regime"]
+    save_state(state)
+    log(
+        f"REGIME {regime_info['regime']} btc24={regime_info['btc_chg24']:+.2f}% "
+        f"buys={state.get('buys_today', 0)}/{MAX_BUYS_PER_DAY} "
+        f"daily={read_daily_count('binance')}/{cap}"
+    )
+    log(
+        f"KNOBS TP={TP} SL={SL} TRAIL={TRAIL_ACT}/{TRAIL_GB} "
+        f"TIME={TIME_STOP_HOURS}h MAX_BUYS={MAX_BUYS_PER_DAY} LEGS={MAX_OPEN_LEGS}"
+    )
+
+    made = 0
+    # Soft day-loss brake: exits OK, no new risk
+    eq_now = book_equity()
+    goals.ensure_goals(state, eq_now, venue="binance")
+    day_open = float((state.get("goals") or {}).get("day_open_equity") or eq_now)
+    day_pnl_pct = ((eq_now - day_open) / day_open * 100.0) if day_open > 0 else 0.0
+    loss_halt_buys = day_pnl_pct <= DAY_LOSS_HALT_PCT
+    if loss_halt_buys:
+        log(f"DAY_LOSS_HALT_BUYS pnl_pct={day_pnl_pct:.2f}% (threshold {DAY_LOSS_HALT_PCT}%)")
+
+    # EXIT
+    log("ACTION EXIT")
+    if try_exits(state):
+        made += 1
+        state = load_state()
+        time.sleep(2)
+
+    # CONSOLIDATE
+    log("ACTION CONSOLIDATE")
+    state = load_state()
+    if (not loss_halt_buys) and try_consolidate(state):
+        made += 1
+        state = load_state()
+        time.sleep(2)
+
+    # BUY (maybe one more if slots remain)
+    log("ACTION BUY")
+    state = load_state()
+    try:
+        import market_orchestrator as orch
+
+        can_buy = (not loss_halt_buys) and orch.allows_v6_buys()
+    except Exception:
+        can_buy = not loss_halt_buys
+    if can_buy and try_buy(state, regime_info):
+        made += 1
+        state = load_state()
+        # After a buy, immediately re-check exit overflow next tick; optional second buy if slots
+        if (
+            read_daily_count("binance") < cap
+            and int(load_state().get("buys_today") or 0) < MAX_BUYS_PER_DAY
+            and not loss_halt_buys
+            and can_buy
+        ):
+            time.sleep(2)
+            state = load_state()
+            if try_buy(state, regime_info):
+                made += 1
+    elif loss_halt_buys:
+        log("SKIP_BUY day_loss_halt")
+    elif not can_buy:
+        log("SKIP_BUY orch_mode")
+
+    # If still over max legs and gate slot left, force rotate exit
+    state = load_state()
+    holdings = sync_positions(state)
+    legs = sum(1 for h in holdings.values() if h["usd"] >= 0.5)
+    if legs > MAX_OPEN_LEGS and read_daily_count("binance") < cap:
+        log("ACTION ROTATE_DOWN")
+        exit_c = pick_exit(state, holdings, rotate_down=True, emergency_only=False)
+        if exit_c and exit_c["kind"] == "rotate":
+            if execute_sell(state, exit_c, emergency=False):
+                made += 1
+
+    log(
+        f"TICK_DONE made={made} daily={read_daily_count('binance')}/{cap} "
+        f"buys={load_state().get('buys_today')}/{MAX_BUYS_PER_DAY} "
+        f"eq=${book_equity():.2f} regime={regime_info['regime']}"
+    )
+
+
+def sleep_seconds() -> int:
+    from src.live.daily_count import read_daily_count
+    from src.live.mandate.store import load_mandate
+
+    mandate = load_mandate("binance")
+    cap = mandate.hard_caps.max_trades_per_day if mandate else 3
+    daily = read_daily_count("binance")
+    if has_exitable_leg(load_state()):
+        return POLL_OPEN_SEC
+    if daily < cap:
+        return POLL_HUNT_SEC
+    return POLL_IDLE_SEC
+
+
+def main() -> None:
+    log(f"AUTOTRADE_START host=hetzner {STRATEGY_TAG}")
+    log(
+        f"KNOBS TP={TP} SL={SL} TRAIL={TRAIL_ACT}/{TRAIL_GB} TIME={TIME_STOP_HOURS} "
+        f"ORDER={ORDER_USD} MAX_BUYS={MAX_BUYS_PER_DAY} LEGS={MAX_OPEN_LEGS}"
+    )
+    # No TG spam on restart
+    while True:
+        try:
+            tick()
+        except Exception as exc:  # noqa: BLE001
+            log(f"TICK_EXC {exc}")
+            tg(format_error_tg(str(exc)))
+        sec = sleep_seconds()
+        log(f"SLEEP {sec}")
+        time.sleep(sec)
+
+
+if __name__ == "__main__":
+    main()
