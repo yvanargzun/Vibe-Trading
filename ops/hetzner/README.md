@@ -1,21 +1,21 @@
 # Hetzner Vibe runtime (canonical copies)
 
-These files are the **code of record** for `/root/.vibe-trading` on the VPS.
-Runtime secrets and state stay on the server (and locally in `~/.vibe-trading`) — **never commit `.env`**.
+Code of record for `/root/.vibe-trading` on the VPS.
+Secrets/state live only in that runtime home (and local `~/.vibe-trading`) — **never commit `.env`**.
 
 ## Boundary
 
 | Location | Role |
 |----------|------|
-| This folder (`ops/hetzner/`) | Source for Binance/Vibe loops, Telegram control bot, digests |
-| `/root/.vibe-trading` on VPS | Runtime home: `.env`, state, charts history |
-| `/opt/vibe-trade` | Vibe-Trading product / agent install |
-| [Alpaca-Paper-Trading](https://github.com/yvanargzun/Alpaca-Paper-Trading) | Alpaca only — do not patch from here the other way |
+| `ops/hetzner/` | Source for Binance/Vibe loops, Telegram control, digests |
+| `/root/.vibe-trading` | Runtime: `.env`, state, chart history |
+| `/opt/vibe-trade` | Vibe-Trading agent install |
+| [Alpaca-Paper-Trading](https://github.com/yvanargzun/Alpaca-Paper-Trading) | Alpaca only |
 
-Telegram tokens: set in `/root/.vibe-trading/.env` (and local `C:\Users\Pc\.vibe-trading\.env`).
+Telegram: `/root/.vibe-trading/.env` (local: `C:\Users\Pc\.vibe-trading\.env`).
 Do **not** read `Projects\Synaptica\.env`.
 
-## Deploy to VPS
+## Deploy
 
 ```powershell
 cd C:\Users\Pc\Vibe-Trade\ops\hetzner
@@ -28,4 +28,4 @@ scp -i $env:USERPROFILE\.ssh\hetzner_vibe `
 ssh -i $env:USERPROFILE\.ssh\hetzner_vibe root@46.225.50.87 "bash /tmp/deploy_vibe_runtime.sh"
 ```
 
-One-off historical patches under `patch_binance_*.py` are kept for reference; prefer editing the canonical `.py` files above and redeploying.
+`patch_binance_*.py` / chart patches are historical one-offs moved out of the Alpaca repo; prefer editing canonical `.py` files and redeploying.
