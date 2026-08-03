@@ -351,20 +351,24 @@ def render_chart(
         linewidths=1.2,
     )
 
-    # Goal hits + trade markers
+    # Goal hits + trade markers (clear labels + CDMX time)
     kind_style = {
-        "daily": (hit_day, "*", 120, "Meta dia"),
-        "weekly": (hit_week, "*", 120, "Meta semana"),
-        "buy": ("#16a34a", "^", 70, "Compra"),
-        "sell": ("#2563eb", "v", 70, "Venta"),
-        "win": ("#15803d", "v", 90, "Ganancia"),
-        "loss": ("#dc2626", "x", 80, "Perdida"),
-        "mode_change": ("#a855f7", "|", 0, "Cambio modo"),
+        "daily": (hit_day, "*", 130, "Meta dia", None),
+        "weekly": (hit_week, "*", 130, "Meta semana", None),
+        "buy": ("#15803d", "^", 110, "Compra", "C"),
+        "sell": ("#1d4ed8", "v", 110, "Venta", "V"),
+        "win": ("#166534", "v", 120, "Ganancia", "+"),
+        "loss": ("#b91c1c", "x", 110, "Perdida", "−"),
+        "mode_change": ("#7e22ce", "|", 0, "Cambio modo", None),
     }
     seen = set()
     trade_kinds = {"buy", "sell", "win", "loss", "mode_change"}
     trade_ms = [m for m in markers if str(m.get("kind")) in trade_kinds][-MAX_TRADE_MARKERS_VIEW:]
     goal_ms = [m for m in markers if str(m.get("kind")) in ("daily", "weekly")]
+    # Track previous annotations to offset overlaps (~12 min)
+    last_ann: list[tuple[datetime, float]] = []
+    ann_idx = 0
+
     for m in goal_ms + trade_ms:
         try:
             mt = _to_local(float(m["ts"]))
@@ -374,26 +378,40 @@ def render_chart(
         if mt < x_left or mt > x_right:
             continue
         kind = str(m.get("kind") or "")
-        color, mark, size, legend = kind_style.get(kind, ("#dc2626", "*", 100, kind))
+        color, mark, size, legend, tag = kind_style.get(
+            kind, ("#dc2626", "*", 100, kind, None)
+        )
+        hhmm = mt.strftime("%H:%M")
+
         if kind == "mode_change":
-            ax.axvline(mt, color=color, linestyle="--", linewidth=1.0, alpha=0.55, zorder=4)
+            ax.axvline(mt, color=color, linestyle="--", linewidth=1.8, alpha=0.75, zorder=4)
             lab = legend if legend not in seen else None
             if lab:
                 seen.add(legend)
-                # Dummy artist so "Cambio modo" appears in legend
-                ax.plot([], [], color=color, linestyle="--", linewidth=1.2, label=lab)
-            ax.text(
-                mt,
-                y_max - pad * 0.15,
-                str(m.get("label") or "")[:8],
+                ax.plot([], [], color=color, linestyle="--", linewidth=1.8, label=lab)
+            mode_name = str(m.get("label") or m.get("symbol") or "MODO").upper()[:10]
+            banner = f"MODO {mode_name} · {hhmm}"
+            ax.annotate(
+                banner,
+                xy=(mt, y_max - pad * 0.05),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                fontweight="bold",
                 color=color,
-                fontsize=7,
-                rotation=90,
-                va="top",
-                ha="right",
-                alpha=0.85,
+                bbox={
+                    "boxstyle": "round,pad=0.25",
+                    "facecolor": "#faf5ff",
+                    "edgecolor": color,
+                    "linewidth": 1.0,
+                    "alpha": 0.95,
+                },
+                zorder=7,
             )
             continue
+
         lab = legend if legend not in seen else None
         if lab:
             seen.add(legend)
@@ -405,9 +423,40 @@ def render_chart(
             color=color,
             zorder=6,
             edgecolors="white",
-            linewidths=0.8,
+            linewidths=1.4,
             label=lab,
         )
+
+        # Short tag + local time; alternate vertical offset if overlapping
+        if tag:
+            y_off = 10
+            for prev_t, prev_y in last_ann[-6:]:
+                close_t = abs((mt - prev_t).total_seconds()) < 12 * 60
+                close_y = abs(me - prev_y) < max(pad * 0.35, abs(y_max - y_min) * 0.04, 0.02)
+                if close_t or close_y:
+                    y_off = 10 + (14 if ann_idx % 2 == 0 else -16)
+                    break
+            ann_idx += 1
+            last_ann.append((mt, me))
+            ax.annotate(
+                f"{tag} {hhmm}",
+                xy=(mt, me),
+                xytext=(6, y_off),
+                textcoords="offset points",
+                ha="left",
+                va="center",
+                fontsize=8,
+                fontweight="bold",
+                color=color,
+                bbox={
+                    "boxstyle": "round,pad=0.18",
+                    "facecolor": "#ffffff",
+                    "edgecolor": color,
+                    "linewidth": 0.9,
+                    "alpha": 0.92,
+                },
+                zorder=8,
+            )
 
     delta = equity_now - start_eq
     sign = "+" if delta >= 0 else ""
