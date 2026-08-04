@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """smart-fast-v6: fast realized profits + x2 cycle (Hetzner Binance Spot).
 
-Spec knobs and flow are fixed; see module constants below.
+Law: PROMPT_V6.md · knobs: v6_config.py · cycle debug: v6_trace.py
 """
 
 from __future__ import annotations
@@ -12,63 +12,60 @@ import json
 import os
 import sys
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import sys as _sys
-_sys.path.insert(0, "/root/.vibe-trading")
+_HERE = Path(__file__).resolve().parent
+HOME = Path(os.environ.get("VIBE_TRADING_HOME", "/root/.vibe-trading"))
+for _p in (_HERE, HOME, Path("/root/.vibe-trading")):
+    s = str(_p)
+    if s not in sys.path:
+        sys.path.insert(0, s)
+
 import dynamic_goals as goals
 import equity_chart as equity_chart
+import v6_config as cfg
+import v6_trace
 
 AGENT = Path("/opt/vibe-trade/agent")
 sys.path.insert(0, str(AGENT))
 
-HOME = Path(os.environ.get("VIBE_TRADING_HOME", "/root/.vibe-trading"))
 ENV_PATH = HOME / ".env"
 STATE_PATH = HOME / "autotrade_state.json"
 LOG_PATH = HOME / "autotrade_loop.log"
 
-# --- KNOBS (smart-fast-v6 micro-defensive) ---
-ORDER_USD = float(os.environ.get("AUTOTRADE_ORDER_USD", "5.5"))
-TP = 0.030
-SL = 0.018
-TRAIL_ACT = 0.020
-TRAIL_GB = 0.010
-TIME_STOP_HOURS = 4.0
-MIN_EXIT_USD = 5.0
-MAX_BUYS_PER_DAY = 2
-MAX_OPEN_LEGS = 1
-MAX_MAJOR_BUYS_DAY = 1
-COOLDOWN_HOURS = 4.0
-POLL_OPEN_SEC = 180
-POLL_HUNT_SEC = 900
-POLL_IDLE_SEC = 900
-MIN_USDT = 5.0
-MIN_BUY_SCORE = 3.50
-MIN_BUY_SCORE_BEAR = 4.00
-DUST_USD = 0.50
-DAY_LOSS_HALT_PCT = -3.0
-STRATEGY_TAG = "smart-fast-v6"
-VENUE_TAG = "Binance"
-
-# ETH reserved for parallel vibe-eth-scalp; do not hunt or liquidate it here.
-MAJORS = {"BTC", "BNB"}
-FUND_ASSETS = ("ADA", "GALA", "POL", "DOGE", "S", "MANA", "SAND", "XRP", "LINK", "SOL")
-UNIVERSE = [
-    "BTCUSDT",
-    "BNBUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "DOGEUSDT",
-    "ADAUSDT",
-    "LINKUSDT",
-]
-STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI", "USD"}
+# --- KNOBS (re-export from v6_config for call sites) ---
+ORDER_USD = cfg.ORDER_USD
+TP = cfg.TP
+SL = cfg.SL
+TRAIL_ACT = cfg.TRAIL_ACT
+TRAIL_GB = cfg.TRAIL_GB
+TIME_STOP_HOURS = cfg.TIME_STOP_HOURS
+MIN_EXIT_USD = cfg.MIN_EXIT_USD
+MAX_BUYS_PER_DAY = cfg.MAX_BUYS_PER_DAY
+MAX_OPEN_LEGS = cfg.MAX_OPEN_LEGS
+MAX_MAJOR_BUYS_DAY = cfg.MAX_MAJOR_BUYS_DAY
+COOLDOWN_HOURS = cfg.COOLDOWN_HOURS
+POLL_OPEN_SEC = cfg.POLL_OPEN_SEC
+POLL_HUNT_SEC = cfg.POLL_HUNT_SEC
+POLL_IDLE_SEC = cfg.POLL_IDLE_SEC
+MIN_USDT = cfg.MIN_USDT
+MIN_BUY_SCORE = cfg.MIN_BUY_SCORE
+MIN_BUY_SCORE_BEAR = cfg.MIN_BUY_SCORE_BEAR
+DUST_USD = cfg.DUST_USD
+DAY_LOSS_HALT_PCT = cfg.DAY_LOSS_HALT_PCT
+STRATEGY_TAG = cfg.STRATEGY_TAG
+VENUE_TAG = cfg.VENUE_TAG
+MAJORS = set(cfg.MAJORS)
+FUND_ASSETS = cfg.FUND_ASSETS
+UNIVERSE = list(cfg.UNIVERSE)
+STABLES = set(cfg.STABLES)
+SCALP_USDT_RESERVE = cfg.SCALP_USDT_RESERVE
 SCALP_STATE_PATH = HOME / "eth_scalp_state.json"
-SCALP_USDT_RESERVE = 5.0  # only when scalper has position / active_float
 ORDER_LOCK_PATH = HOME / "order.lock"
 
 # Per-tick guards
@@ -446,28 +443,8 @@ def free_usdt() -> float:
 
 
 def scalp_reserved_usdt() -> float:
-    """USDT claimed by ETH scalper — only while in play (position / active float).
-
-    Idle/dead scalper must not freeze ~$5 that v6 needs.
-    """
-    if not SCALP_STATE_PATH.exists():
-        return 0.0
-    try:
-        st = json.loads(SCALP_STATE_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return 0.0
-    has_pos = bool(st.get("position"))
-    active = bool(st.get("active_float"))
-    regime = str(st.get("last_regime") or "")
-    last_fill = float(st.get("last_fill_ts") or 0)
-    if has_pos:
-        return max(float(st.get("reserved_usdt") or 0), SCALP_USDT_RESERVE)
-    if not active:
-        return 0.0
-    # Flat but float flag stuck: release when dead or idle >30m
-    if regime == "dead" or (last_fill and (time.time() - last_fill) > 1800) or not last_fill:
-        return 0.0
-    return max(float(st.get("reserved_usdt") or 0), SCALP_USDT_RESERVE)
+    """ETH scalper retired — never reserve USDT from v6."""
+    return 0.0
 
 
 def usable_usdt_for_v6() -> float:
@@ -475,7 +452,7 @@ def usable_usdt_for_v6() -> float:
 
 
 def with_order_lock(timeout: float = 45.0):
-    """Simple flock-style lock shared with vibe-eth-scalp."""
+    """Simple flock-style lock for serialized Binance orders."""
     import contextlib
 
     @contextlib.contextmanager
@@ -696,8 +673,6 @@ def ensure_spot_usdt(need: float, state: dict) -> float:
         for a, meta in (state.get("positions") or {}).items()
         if float((meta or {}).get("usd") or 0) >= MIN_EXIT_USD
     }
-    # Never liquidate ETH — owned by parallel eth scalper
-    hard_protect.add("ETH")
 
     # 1) Earn USDT
     for row in flexible_positions():
@@ -716,8 +691,8 @@ def ensure_spot_usdt(need: float, state: dict) -> float:
     if free >= need:
         return free_usdt()
 
-    # 3) Redeem earn majors/alts then sell non-tracked (never ETH)
-    for asset in ("FDUSD",) + FUND_ASSETS + ("BTC", "BNB"):
+    # 3) Redeem earn majors/alts then sell non-tracked (ETH fair game)
+    for asset in ("FDUSD",) + FUND_ASSETS + ("BTC", "BNB", "ETH"):
         free = usable_usdt_for_v6()
         if free >= need:
             return free_usdt()
@@ -729,7 +704,7 @@ def ensure_spot_usdt(need: float, state: dict) -> float:
         free = usable_usdt_for_v6()
         if free >= need:
             return free_usdt()
-        if asset in hard_protect or asset == "ETH":
+        if asset in hard_protect:
             continue
         if asset in _tick_sold:
             continue
@@ -741,12 +716,12 @@ def ensure_spot_usdt(need: float, state: dict) -> float:
     if free >= need:
         return free_usdt()
 
-    # 4) Last resort: sell protected strategy legs (never ETH)
+    # 4) Last resort: sell protected strategy legs
     for asset in list(hard_protect):
         free = usable_usdt_for_v6()
         if free >= need:
             break
-        if asset == "ETH" or asset in _tick_sold:
+        if asset in _tick_sold:
             continue
         log(f"FUND_SELL_LAST_RESORT {asset}")
         market_sell_raw(asset, need_usd=need - usable_usdt_for_v6())
@@ -1357,6 +1332,12 @@ def select_buy(
     return None
 
 
+def _trace_skip(reason: str, **fields: Any) -> None:
+    cur = v6_trace.current()
+    if cur is not None:
+        cur.skip(reason, **fields)
+
+
 def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
     from src.live.daily_count import read_daily_count
     from src.live.halt import halt_flag_set
@@ -1367,6 +1348,7 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
 
     if halt_flag_set("binance") or halt_flag_set(None):
         log("HALTED")
+        _trace_skip("halt")
         return False
     mode = orch.current_mode()
     if not orch.allows_v6_buys(mode):
@@ -1378,22 +1360,27 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
                 detail=f"frac={feats.get('notional_frac')}",
                 mode=mode,
             )
+            _trace_skip("fee_budget", mode=mode, frac=feats.get("notional_frac"))
         else:
             te.record_skip("SKIP_MODE", bot="v6", detail=f"mode={mode}", mode=mode)
+            _trace_skip("orch_mode", mode=mode)
         log(f"SKIP_MODE buy blocked mode={mode}")
         return False
     mandate = load_mandate("binance")
     if mandate is None:
         log("NO_MANDATE")
+        _trace_skip("no_mandate")
         return False
     ensure_buy_counters(state)
     daily = read_daily_count("binance")
     cap = mandate.hard_caps.max_trades_per_day
     if daily >= cap:
         log(f"DAY_FULL {daily}/{cap}")
+        _trace_skip("day_full", daily=daily, cap=cap)
         return False
     if int(state.get("buys_today") or 0) >= MAX_BUYS_PER_DAY:
         log(f"BUYS_FULL {state['buys_today']}/{MAX_BUYS_PER_DAY}")
+        _trace_skip("buys_full", buys=state.get("buys_today"))
         return False
 
     notional = min(ORDER_USD, float(mandate.hard_caps.max_order_notional_usd))
@@ -1405,6 +1392,14 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
             f"RANK1 {top['base']} score={top['score']:.2f} rsi={top['rsi']:.0f} "
             f"rs={top['rs']:+.1f} {','.join(top['reasons']) or '-'}"
         )
+        cur = v6_trace.current()
+        if cur is not None:
+            cur.phase(
+                "rank1",
+                symbol=top["base"],
+                score=round(float(top["score"]), 2),
+                reasons=",".join(top["reasons"]) or "-",
+            )
     pick = select_buy(ranked, state, regime_info["regime"], holdings)
     if not pick:
         te.record_skip(
@@ -1413,6 +1408,7 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
             detail=f"regime={regime_info['regime']}",
             mode=mode,
         )
+        _trace_skip("score", regime=regime_info["regime"])
         log(f"NO_QUALITY_BUY regime={regime_info['regime']} (cash ok)")
         return False
 
@@ -1426,6 +1422,7 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
                 detail=f"usable={usable_usdt_for_v6():.2f}",
                 mode=mode,
             )
+            _trace_skip("no_bankroll", usable=round(usable_usdt_for_v6(), 4))
             log(f"NO_USDT usable={usable_usdt_for_v6():.4f} free={free:.4f}")
             return False
     else:
@@ -1437,6 +1434,7 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
                 detail=f"free={free:.2f}",
                 mode=mode,
             )
+            _trace_skip("no_bankroll", free=round(free, 4))
             log(f"NO_USDT free={free:.4f}")
             return False
 
@@ -1447,10 +1445,21 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
             detail=f"usable={usable_usdt_for_v6():.2f}",
             mode=mode,
         )
+        _trace_skip("no_bankroll", usable=round(usable_usdt_for_v6(), 4))
         log(f"SKIP_BUY low_usable_usdt={usable_usdt_for_v6():.4f}")
         return False
 
     pair = f"{pick['base']}/USDT"
+    cur = v6_trace.current()
+    if cur is not None:
+        cur.decide(
+            "BUY",
+            reason="placing",
+            symbol=pick["base"],
+            score=round(float(pick["score"]), 2),
+            notional=notional,
+            mode=mode,
+        )
     log(
         f"STRATEGY_BUY {pair} ${notional:.2f} score={pick['score']:.2f} "
         f"regime={regime_info['regime']} mode={mode} reasons={pick['reasons']}"
@@ -1552,6 +1561,15 @@ def has_exitable_leg(state: dict) -> bool:
     return any(h["usd"] >= MIN_EXIT_USD for h in holdings.values())
 
 
+def _orch_mode() -> str:
+    try:
+        import market_orchestrator as orch
+
+        return str(orch.current_mode())
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
 def tick() -> None:
     global _tick_sold, _tick_fund_sold
     _tick_sold = set()
@@ -1561,114 +1579,183 @@ def tick() -> None:
     from src.live.halt import halt_flag_set
     from src.live.mandate.store import load_mandate
 
-    state = load_state()
-    # Preserve baseline; tag strategy
-    state["strategy"] = STRATEGY_TAG
-    ensure_buy_counters(state)
-    save_state(state)
+    with v6_trace.cycle(log_fn=log, strategy=STRATEGY_TAG, prompt=cfg.PROMPT_VERSION) as tr:
+        phase = "preflight"
+        tr.phase(phase)
 
-    if halt_flag_set("binance") or halt_flag_set(None):
-        log("HALTED skip tick")
-        return
-
-    try:
-        import market_orchestrator as orch
-
-        orch.evaluate_and_update(notify=True)
-    except Exception as exc:  # noqa: BLE001
-        log(f"ORCH_FAIL {exc}")
-
-    check_double(state)
-    mandate = load_mandate("binance")
-    cap = mandate.hard_caps.max_trades_per_day if mandate else 3
-
-    try:
-        regime_info = detect_regime()
-    except Exception as exc:  # noqa: BLE001
-        log(f"REGIME_FAIL {exc}")
-        regime_info = {"regime": "chop", "btc_chg24": 0.0, "atr": 0.02}
-
-    state["regime"] = regime_info["regime"]
-    save_state(state)
-    log(
-        f"REGIME {regime_info['regime']} btc24={regime_info['btc_chg24']:+.2f}% "
-        f"buys={state.get('buys_today', 0)}/{MAX_BUYS_PER_DAY} "
-        f"daily={read_daily_count('binance')}/{cap}"
-    )
-    log(
-        f"KNOBS TP={TP} SL={SL} TRAIL={TRAIL_ACT}/{TRAIL_GB} "
-        f"TIME={TIME_STOP_HOURS}h MAX_BUYS={MAX_BUYS_PER_DAY} LEGS={MAX_OPEN_LEGS}"
-    )
-
-    made = 0
-    # Soft day-loss brake: exits OK, no new risk
-    eq_now = book_equity()
-    goals.ensure_goals(state, eq_now, venue="binance")
-    day_open = float((state.get("goals") or {}).get("day_open_equity") or eq_now)
-    day_pnl_pct = ((eq_now - day_open) / day_open * 100.0) if day_open > 0 else 0.0
-    loss_halt_buys = day_pnl_pct <= DAY_LOSS_HALT_PCT
-    if loss_halt_buys:
-        log(f"DAY_LOSS_HALT_BUYS pnl_pct={day_pnl_pct:.2f}% (threshold {DAY_LOSS_HALT_PCT}%)")
-
-    # EXIT
-    log("ACTION EXIT")
-    if try_exits(state):
-        made += 1
         state = load_state()
-        time.sleep(2)
+        state["strategy"] = STRATEGY_TAG
+        ensure_buy_counters(state)
+        save_state(state)
 
-    # CONSOLIDATE
-    log("ACTION CONSOLIDATE")
-    state = load_state()
-    if (not loss_halt_buys) and try_consolidate(state):
-        made += 1
-        state = load_state()
-        time.sleep(2)
+        if halt_flag_set("binance") or halt_flag_set(None):
+            tr.skip("halt")
+            tr.end(made=0, note="halted")
+            log("HALTED skip tick")
+            return
 
-    # BUY (maybe one more if slots remain)
-    log("ACTION BUY")
-    state = load_state()
-    try:
-        import market_orchestrator as orch
+        phase = "orch"
+        tr.phase(phase)
+        try:
+            import market_orchestrator as orch
 
-        can_buy = (not loss_halt_buys) and orch.allows_v6_buys()
-    except Exception:
-        can_buy = not loss_halt_buys
-    if can_buy and try_buy(state, regime_info):
-        made += 1
-        state = load_state()
-        # After a buy, immediately re-check exit overflow next tick; optional second buy if slots
-        if (
-            read_daily_count("binance") < cap
-            and int(load_state().get("buys_today") or 0) < MAX_BUYS_PER_DAY
-            and not loss_halt_buys
-            and can_buy
-        ):
-            time.sleep(2)
+            orch.evaluate_and_update(notify=True)
+        except Exception as exc:  # noqa: BLE001
+            log(f"ORCH_FAIL {exc}")
+            tr.phase("orch_fail", exc=str(exc)[:200])
+
+        phase = "double"
+        tr.phase(phase)
+        check_double(state)
+        mandate = load_mandate("binance")
+        cap = mandate.hard_caps.max_trades_per_day if mandate else 3
+
+        phase = "regime"
+        tr.phase(phase)
+        try:
+            regime_info = detect_regime()
+        except Exception as exc:  # noqa: BLE001
+            log(f"REGIME_FAIL {exc}")
+            regime_info = {"regime": "chop", "btc_chg24": 0.0, "atr": 0.02}
+            tr.phase("regime_fail", exc=str(exc)[:200])
+
+        state["regime"] = regime_info["regime"]
+        save_state(state)
+        log(
+            f"REGIME {regime_info['regime']} btc24={regime_info['btc_chg24']:+.2f}% "
+            f"buys={state.get('buys_today', 0)}/{MAX_BUYS_PER_DAY} "
+            f"daily={read_daily_count('binance')}/{cap}"
+        )
+        log(f"KNOBS {cfg.knobs_summary()}")
+
+        made = 0
+        phase = "goals"
+        tr.phase(phase)
+        eq_now = book_equity()
+        goals.ensure_goals(state, eq_now, venue="binance")
+        save_state(state)
+        day_open = float((state.get("goals") or {}).get("day_open_equity") or eq_now)
+        day_pnl_pct = ((eq_now - day_open) / day_open * 100.0) if day_open > 0 else 0.0
+        loss_halt_buys = day_pnl_pct <= DAY_LOSS_HALT_PCT
+        usable = 0.0
+        try:
+            usable = float(usable_usdt_for_v6())
+        except Exception as exc:  # noqa: BLE001
+            log(f"USABLE_FAIL {exc}")
+
+        modo = _orch_mode()
+        holdings0 = sync_positions(state)
+        pos_n = sum(1 for h in holdings0.values() if h["usd"] >= 0.5)
+        tr.ctx.update(
+            {
+                "modo_orch": modo,
+                "sleeve_usd": round(eq_now, 4),
+                "usable_usdt": round(usable, 4),
+                "day_pnl_pct": round(day_pnl_pct, 3),
+                "posiciones": pos_n,
+                "regime": regime_info["regime"],
+                "btc_chg24": regime_info.get("btc_chg24"),
+            }
+        )
+        if loss_halt_buys:
+            log(f"DAY_LOSS_HALT_BUYS pnl_pct={day_pnl_pct:.2f}% (threshold {DAY_LOSS_HALT_PCT}%)")
+            tr.skip("day_loss_halt", day_pnl_pct=day_pnl_pct)
+
+        phase = "exit"
+        tr.phase(phase)
+        log("ACTION EXIT")
+        if try_exits(state):
+            made += 1
+            tr.decide("EXIT", reason="exit_fired")
             state = load_state()
-            if try_buy(state, regime_info):
-                made += 1
-    elif loss_halt_buys:
-        log("SKIP_BUY day_loss_halt")
-    elif not can_buy:
-        log("SKIP_BUY orch_mode")
+            time.sleep(2)
 
-    # If still over max legs and gate slot left, force rotate exit
-    state = load_state()
-    holdings = sync_positions(state)
-    legs = sum(1 for h in holdings.values() if h["usd"] >= 0.5)
-    if legs > MAX_OPEN_LEGS and read_daily_count("binance") < cap:
-        log("ACTION ROTATE_DOWN")
-        exit_c = pick_exit(state, holdings, rotate_down=True, emergency_only=False)
-        if exit_c and exit_c["kind"] == "rotate":
-            if execute_sell(state, exit_c, emergency=False):
-                made += 1
+        phase = "consolidate"
+        tr.phase(phase)
+        log("ACTION CONSOLIDATE")
+        state = load_state()
+        if (not loss_halt_buys) and try_consolidate(state):
+            made += 1
+            tr.decide("CONSOLIDATE", reason="consolidate_fired")
+            state = load_state()
+            time.sleep(2)
 
-    log(
-        f"TICK_DONE made={made} daily={read_daily_count('binance')}/{cap} "
-        f"buys={load_state().get('buys_today')}/{MAX_BUYS_PER_DAY} "
-        f"eq=${book_equity():.2f} regime={regime_info['regime']}"
-    )
+        phase = "buy"
+        tr.phase(phase)
+        log("ACTION BUY")
+        state = load_state()
+        try:
+            import market_orchestrator as orch
+
+            can_buy = (not loss_halt_buys) and orch.allows_v6_buys()
+        except Exception as exc:  # noqa: BLE001
+            can_buy = not loss_halt_buys
+            tr.phase("buy_orch_fail", exc=str(exc)[:200])
+
+        bought = False
+        if can_buy and try_buy(state, regime_info):
+            made += 1
+            bought = True
+            tr.decide("BUY", reason="buy_ok")
+            state = load_state()
+            if (
+                read_daily_count("binance") < cap
+                and int(load_state().get("buys_today") or 0) < MAX_BUYS_PER_DAY
+                and not loss_halt_buys
+                and can_buy
+            ):
+                time.sleep(2)
+                state = load_state()
+                if try_buy(state, regime_info):
+                    made += 1
+                    tr.decide("BUY", reason="buy_second")
+        elif loss_halt_buys:
+            log("SKIP_BUY day_loss_halt")
+            tr.skip("day_loss_halt")
+        elif not can_buy:
+            log("SKIP_BUY orch_mode")
+            tr.skip("orch_mode", mode=modo)
+
+        phase = "rotate"
+        tr.phase(phase)
+        state = load_state()
+        holdings = sync_positions(state)
+        legs = sum(1 for h in holdings.values() if h["usd"] >= 0.5)
+        if legs > MAX_OPEN_LEGS and read_daily_count("binance") < cap:
+            log("ACTION ROTATE_DOWN")
+            exit_c = pick_exit(state, holdings, rotate_down=True, emergency_only=False)
+            if exit_c and exit_c["kind"] == "rotate":
+                if execute_sell(state, exit_c, emergency=False):
+                    made += 1
+                    tr.decide(
+                        "EXIT",
+                        reason="rotate_down",
+                        symbol=exit_c.get("base") or exit_c.get("symbol"),
+                    )
+
+        if made == 0 and tr.decision.get("action") in ("HOLD", "SKIP"):
+            if not bought and tr.decision.get("reason") == "tick_start":
+                tr.decide("HOLD", reason="no_action")
+
+        eq_end = book_equity()
+        tr.end(
+            made=made,
+            daily=read_daily_count("binance"),
+            daily_cap=cap,
+            buys_today=load_state().get("buys_today"),
+            sleeve_usd=round(eq_end, 4),
+            usable_usdt=round(usable, 4),
+            modo_orch=modo,
+            regime=regime_info["regime"],
+            day_pnl_pct=round(day_pnl_pct, 3),
+            posiciones=legs,
+        )
+        log(
+            f"TICK_DONE id={tr.cycle_id} made={made} daily={read_daily_count('binance')}/{cap} "
+            f"buys={load_state().get('buys_today')}/{MAX_BUYS_PER_DAY} "
+            f"eq=${eq_end:.2f} regime={regime_info['regime']} mode={modo} "
+            f"dec={tr.decision.get('action')}:{tr.decision.get('reason')}"
+        )
 
 
 def sleep_seconds() -> int:
@@ -1686,17 +1773,25 @@ def sleep_seconds() -> int:
 
 
 def main() -> None:
-    log(f"AUTOTRADE_START host=hetzner {STRATEGY_TAG}")
-    log(
-        f"KNOBS TP={TP} SL={SL} TRAIL={TRAIL_ACT}/{TRAIL_GB} TIME={TIME_STOP_HOURS} "
-        f"ORDER={ORDER_USD} MAX_BUYS={MAX_BUYS_PER_DAY} LEGS={MAX_OPEN_LEGS}"
-    )
-    # No TG spam on restart
+    log(f"AUTOTRADE_START host=hetzner {STRATEGY_TAG} prompt={cfg.PROMPT_VERSION}")
+    log(f"KNOBS {cfg.knobs_summary()}")
+    log(f"TRACE_FILE {v6_trace.CYCLES_PATH}")
     while True:
         try:
             tick()
         except Exception as exc:  # noqa: BLE001
+            tb = traceback.format_exc()
             log(f"TICK_EXC {exc}")
+            log(f"TICK_EXC_TB {tb[-2000:]}")
+            # Ensure error lands in cycles even if context manager already wrote
+            try:
+                cur = v6_trace.current()
+                if cur is None:
+                    tr = v6_trace.CycleTrace(log_fn=log)
+                    tr.start(note="outer_catch")
+                    tr.error("tick", exc)
+            except Exception:  # noqa: BLE001
+                pass
             tg(format_error_tg(str(exc)))
         sec = sleep_seconds()
         log(f"SLEEP {sec}")

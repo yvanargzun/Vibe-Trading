@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Rule-based market orchestrator for v6 + ETH scalper (no LLM)."""
+"""Rule-based market orchestrator for smart-fast-v6 (no LLM).
+
+ETH scalper retired — modes no longer route to scalp_primary.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ MODE_PATH = HOME / "strategy_mode.json"
 SCALP_STATE = HOME / "eth_scalp_state.json"
 AUTOTRADE_STATE = HOME / "autotrade_state.json"
 
+# scalp_primary kept only for migration off disk state
 MODES = ("recap", "standby", "defensive", "v6_primary", "scalp_primary")
 
 # --- timings (agent-owned) ---
@@ -31,10 +35,7 @@ RECAP_ETH_USD = 5.0
 STANDBY_DAY_PNL_PCT = -3.0
 STANDBY_BTC_1H = -2.5
 V6_USDT = 5.5
-SCALP_SCORE = 2.8
-SCALP_BTC_1H_FLOOR = -1.5
-ETH_DEAD_NEED_SEC = 20 * 60
-FEE_NOTIONAL_FRAC = 0.40
+FEE_NOTIONAL_FRAC = 0.55
 
 
 def _http_get(url: str) -> Any:
@@ -89,12 +90,13 @@ def allows_v6_buys(mode: str | None = None) -> bool:
 
 
 def allows_scalper_entries(mode: str | None = None) -> bool:
-    m = mode or current_mode()
-    return m in ("defensive", "scalp_primary")
+    """ETH scalper retired — never allow new scalper entries."""
+    return False
 
 
 def v6_exits_only(mode: str | None = None) -> bool:
     m = mode or current_mode()
+    # scalp_primary treated as exits-only until migrated away
     return m in ("standby", "recap", "scalp_primary")
 
 
@@ -198,7 +200,7 @@ def _book_day_pnl_pct() -> tuple[float, float, float]:
 
 
 def _usable_usdt(eth_m: dict) -> float:
-    """Approx USDT v6 can use: free Spot after salvage, minus scalp reserve."""
+    """Approx USDT v6 can use: free Spot after salvage (no scalp haircut)."""
     usdt = float(eth_m.get("eth_usdt") or 0)
     try:
         import binance_wallets as bw
@@ -207,9 +209,7 @@ def _usable_usdt(eth_m: dict) -> float:
         usdt = max(usdt, float(bw.free_spot_usdt()))
     except Exception:
         pass
-    if eth_m.get("eth_has_pos") or eth_m.get("eth_active_float"):
-        return max(0.0, usdt - 5.0)
-    return usdt
+    return max(0.0, usdt)
 
 
 def propose_mode(features: dict[str, Any]) -> tuple[str, str]:
@@ -219,12 +219,9 @@ def propose_mode(features: dict[str, Any]) -> tuple[str, str]:
     btc_1h = float(features["btc_chg1h"])
     losses = int(features["loss_streak"])
     notional_frac = float(features["notional_frac"])
-    eth_reg = str(features["eth_regime"])
-    eth_dead_s = float(features.get("eth_dead_sec") or 0)
     btc_reg = str(features["btc_regime"])
-    eth_score = float(features["eth_score"])
 
-    if usdt < RECAP_USDT and eth_usd < RECAP_ETH_USD and not features.get("eth_has_pos"):
+    if usdt < RECAP_USDT and eth_usd < RECAP_ETH_USD:
         return "recap", f"capital bajo usdt={usdt:.2f} eth_usd={eth_usd:.2f}"
     if day_pnl <= STANDBY_DAY_PNL_PCT:
         return "standby", f"day_pnl={day_pnl:.2f}%"
@@ -235,22 +232,12 @@ def propose_mode(features: dict[str, Any]) -> tuple[str, str]:
     if notional_frac >= FEE_NOTIONAL_FRAC:
         return "standby", f"fee_budget notional_frac={notional_frac:.2f}"
 
-    scalp_ok = (
-        eth_reg in ("trend", "range")
-        and eth_score >= SCALP_SCORE
-        and (eth_usd >= 5.0 or usdt >= 5.0 or features.get("eth_has_pos"))
-        and btc_1h > SCALP_BTC_1H_FLOOR
-    )
-    v6_ok = btc_reg in ("bull", "trend") and eth_reg == "dead" and eth_dead_s >= ETH_DEAD_NEED_SEC and usdt >= V6_USDT
-
-    if scalp_ok and not v6_ok:
-        return "scalp_primary", f"eth={eth_reg} score={eth_score:.2f}"
-    if v6_ok and not scalp_ok:
-        return "v6_primary", f"btc={btc_reg} eth_dead={eth_dead_s:.0f}s"
-    if scalp_ok and v6_ok:
-        # prefer defensive shared when both look alive
-        return "defensive", "both_themes_active"
-    return "defensive", f"default btc={btc_reg} eth={eth_reg}"
+    # No eth-dead gate — scalper retired; BTC + dry powder decides aggression
+    if btc_reg in ("bull", "trend") and usdt >= V6_USDT:
+        return "v6_primary", f"btc={btc_reg} usdt={usdt:.2f}"
+    if usdt >= V6_USDT:
+        return "defensive", f"default btc={btc_reg} usdt={usdt:.2f}"
+    return "defensive", f"thin usdt={usdt:.2f} btc={btc_reg}"
 
 
 def _min_hold_for(mode: str) -> float:
@@ -276,21 +263,40 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         doc["flips_day"] = day
         doc["flips_today"] = 0
 
+    # One-shot migration off retired scalp_primary
+    if str(doc.get("mode") or "") == "scalp_primary":
+        doc["mode"] = "defensive"
+        doc["reason"] = "migrate_retire_scalper"
+        doc["since_ts"] = now
+        print("ORCH_MIGRATE scalp_primary->defensive", flush=True)
+
     btc = _btc_metrics()
     eth = _eth_metrics()
     day_pnl, eq, day_open = _book_day_pnl_pct()
+
+    # Persist capital-inject rebase so orch + loop share the same day_open
+    try:
+        st = _load_json(AUTOTRADE_STATE)
+        g = dict(st.get("goals") or {})
+        open_eq = float(g.get("day_open_equity") or 0)
+        if eq > 0 and open_eq > 0 and eq >= open_eq * 1.12:
+            g["day_open_equity"] = round(eq, 4)
+            g["capital_rebase_ts"] = now
+            st["goals"] = g
+            st["equity"] = round(eq, 4)
+            AUTOTRADE_STATE.write_text(json.dumps(st, indent=2) + "\n", encoding="utf-8")
+            day_open = eq
+            day_pnl = 0.0
+            print(f"ORCH_DAY_OPEN_REBASE {open_eq:.4f}->{eq:.4f}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ORCH_REBASE_FAIL {exc}", flush=True)
+
     usable = _usable_usdt(eth)
     notional = te.notional_traded_today()
-    notional_frac = (notional / day_open) if day_open > 0 else 0.0
+    # Use live equity when larger so capital injects don't freeze fee_budget
+    denom = max(float(day_open or 0), float(eq or 0), 1.0)
+    notional_frac = notional / denom
     losses = te.consecutive_losses()
-
-    # track eth dead duration
-    if eth["eth_regime"] == "dead":
-        if not doc.get("eth_dead_since"):
-            doc["eth_dead_since"] = now
-    else:
-        doc["eth_dead_since"] = None
-    eth_dead_sec = (now - float(doc["eth_dead_since"])) if doc.get("eth_dead_since") else 0.0
 
     features = {
         **btc,
@@ -302,7 +308,7 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         "notional_today": notional,
         "notional_frac": notional_frac,
         "loss_streak": losses,
-        "eth_dead_sec": eth_dead_sec,
+        "eth_dead_sec": 0.0,
     }
     target, reason = propose_mode(features)
     cur = str(doc.get("mode") or "defensive")
@@ -311,14 +317,24 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
     last_flip = float(doc.get("last_flip_ts") or 0)
     flips = int(doc.get("flips_today") or 0)
 
-    # hard cap flips
+    # Capital recovered: allow leaving standby even after max flips
+    recovery_ok = (
+        usable >= V6_USDT
+        and notional_frac < FEE_NOTIONAL_FRAC
+        and day_pnl > STANDBY_DAY_PNL_PCT
+        and losses < 3
+        and float(features.get("btc_chg1h") or 0) > STANDBY_BTC_1H
+    )
+
+    # hard cap flips — do not trap forever in standby after inject/recovery
     if flips >= MAX_FLIPS_DAY and target != cur:
-        if target != "standby":
+        if cur == "standby" and target in ("defensive", "v6_primary") and recovery_ok:
+            pass
+        elif target != "standby":
             target, reason = "standby", f"max_flips={flips} force_standby"
-        # allow only emergency standby once
-        if cur == "standby":
-            target = cur
-            reason = doc.get("reason") or reason
+            if cur == "standby":
+                target = cur
+                reason = doc.get("reason") or reason
 
     allow = False
     if target == cur:
@@ -327,19 +343,23 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         allow = True
     elif held >= _min_hold_for(cur) and (now - last_flip) >= FLIP_COOLDOWN_SEC:
         allow = True
-    elif cur in ("standby", "recap") and target == "defensive":
-        # exit recap early if capital recovered
-        if cur == "recap" and usable >= 5.0:
+    elif cur in ("standby", "recap") and target in ("defensive", "v6_primary"):
+        # Exit idle modes early when dry powder / inject recovered
+        if recovery_ok and held >= 5 * 60:
+            allow = True
+        elif cur == "recap" and usable >= 5.0:
             allow = held >= 30 * 60
         elif held >= _min_hold_for(cur):
             allow = True
 
     changed = False
     if allow and target != cur:
+        # recovery flip does not burn another flip slot into permanent standby
+        bump = 0 if (cur == "standby" and recovery_ok and flips >= MAX_FLIPS_DAY) else 1
         doc["mode"] = target
         doc["since_ts"] = now
         doc["last_flip_ts"] = now
-        doc["flips_today"] = flips + 1
+        doc["flips_today"] = flips + bump
         doc["reason"] = reason
         changed = True
         te.record_mode_change(target, reason=reason, equity=eq)

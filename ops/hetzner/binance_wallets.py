@@ -133,8 +133,8 @@ def free_spot_usdt() -> float:
 def salvage_usdt_to_spot(*, force: bool = False) -> dict[str, float]:
     """Pull idle Funding + Futures USDT back to MAIN Spot.
 
-    Skips Futures salvage when an ETH futures position is open or scalper
-    has a live position (margin in use).
+    Skips Futures salvage only when an ETH futures position is still open
+    (margin in use). Scalper service is retired — ignore scalp state.
     """
     global _LAST_SALVAGE_TS
     now = time.time()
@@ -160,7 +160,7 @@ def salvage_usdt_to_spot(*, force: bool = False) -> dict[str, float]:
         except Exception as exc:  # noqa: BLE001
             print(f"SALVAGE_FUNDING_FAIL {exc}", flush=True)
 
-    if not futures_eth_open() and not scalp_has_position():
+    if not futures_eth_open():
         fut = futures_usdt_available()
         if fut >= 1.0:
             amt = round(min(fut * 0.99, fut - 0.05), 4)
@@ -177,4 +177,6 @@ def salvage_usdt_to_spot(*, force: bool = False) -> dict[str, float]:
                     time.sleep(0.8)
                 except Exception as exc:  # noqa: BLE001
                     print(f"SALVAGE_FUTURES_FAIL {exc}", flush=True)
+    else:
+        print("SALVAGE_FUTURES_SKIP eth_futures_open", flush=True)
     return moved

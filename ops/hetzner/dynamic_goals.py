@@ -7,6 +7,7 @@ scale with account size and venue.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -144,6 +145,12 @@ def ensure_goals(
     g.setdefault("streak_green_days", 0)
     g.setdefault("daily_hits_total", 0)
     g.setdefault("weekly_hits_total", 0)
+
+    # Capital inject / salvage cliff: rebase day_open so fee_budget & day halt stay sane
+    open_eq = float(g.get("day_open_equity") or 0)
+    if open_eq > 0 and equity >= open_eq * 1.12:
+        g["day_open_equity"] = round(equity, 4)
+        g["capital_rebase_ts"] = time.time()
 
     # Keep long-term baseline for soft reference only
     if not state.get("double_baseline"):
