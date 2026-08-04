@@ -3,7 +3,7 @@
 set -eu
 DEST=/root/.vibe-trading
 mkdir -p "$DEST"
-FILES="telegram_control_bot.py telegram_notify_prefs.py telegram_dynamic_monitor.py telegram_monitor_loop.py vibe_autotrade_loop.py vibe_eth_scalp_loop.py equity_chart.py dynamic_goals.py market_orchestrator.py trade_events.py"
+FILES="telegram_control_bot.py telegram_notify_prefs.py telegram_dynamic_monitor.py telegram_monitor_loop.py vibe_autotrade_loop.py vibe_eth_scalp_loop.py equity_chart.py dynamic_goals.py market_orchestrator.py trade_events.py binance_wallets.py"
 for f in $FILES; do
   if [ -f "/tmp/$f" ]; then
     sed -i 's/\r$//' "/tmp/$f" || true

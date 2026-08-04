@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Binance multi-wallet helpers: Spot + Funding + UM Futures USDT.
+
+Prevents phantom equity cliffs when USDT sits outside Spot, and salvages
+idle Funding/Futures USDT back to MAIN for v6/scalper.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+HOME = Path("/root/.vibe-trading")
+STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI", "USD"}
+_LAST_SALVAGE_TS = 0.0
+SALVAGE_COOLDOWN_SEC = 120.0
+
+
+def _http_price(asset: str) -> float:
+    if asset in STABLES:
+        return 1.0
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={asset}USDT"
+    with urllib.request.urlopen(url, timeout=15) as r:
+        return float(json.loads(r.read())["price"])
+
+
+def _exchange():
+    from src.trading.connectors.binance import sdk as bn
+
+    cfg = bn.load_config()
+    return bn._exchange(cfg), cfg, bn
+
+
+def spot_balances() -> list[dict[str, Any]]:
+    _, cfg, bn = _exchange()
+    acc = bn.get_account_snapshot(cfg)
+    return list(acc.get("balances", []) or [])
+
+
+def funding_usdt_free() -> float:
+    try:
+        ex, _, _ = _exchange()
+        rows = ex.request("asset/get-funding-asset", "sapi", "POST", {"asset": "USDT"})
+        if isinstance(rows, list):
+            for row in rows:
+                if str(row.get("asset") or "") == "USDT":
+                    return float(row.get("free") or 0)
+        if isinstance(rows, dict):
+            return float(rows.get("free") or 0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FUNDING_USDT_FAIL {exc}", flush=True)
+    return 0.0
+
+
+def futures_usdt_available() -> float:
+    try:
+        ex, _, _ = _exchange()
+        bals = ex.fapiPrivateV2GetBalance()
+        for row in bals or []:
+            if str(row.get("asset") or "") == "USDT":
+                return float(row.get("availableBalance") or row.get("balance") or 0)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FUTURES_USDT_FAIL {exc}", flush=True)
+    return 0.0
+
+
+def futures_eth_open() -> bool:
+    try:
+        ex, _, _ = _exchange()
+        pos = ex.fapiPrivateV2GetPositionRisk()
+        for p in pos or []:
+            sym = str(p.get("symbol") or "")
+            amt = abs(float(p.get("positionAmt") or 0))
+            if amt > 0 and sym.startswith("ETH"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def scalp_has_position() -> bool:
+    p = HOME / "eth_scalp_state.json"
+    if not p.exists():
+        return False
+    try:
+        st = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return bool(st.get("position"))
+
+
+def spot_book_equity() -> float:
+    """Spot (+ LD Earn wraps in snapshot) only."""
+    total = 0.0
+    for b in spot_balances():
+        raw = str(b.get("asset") or "")
+        qty = float(b.get("total") or 0) or (
+            float(b.get("free") or 0) + float(b.get("locked") or 0)
+        )
+        if qty <= 0:
+            continue
+        asset = raw[2:] if raw.startswith("LD") and len(raw) > 2 else raw
+        if asset in STABLES:
+            total += qty
+            continue
+        try:
+            total += qty * _http_price(asset)
+        except Exception:
+            continue
+    return total
+
+
+def total_book_equity() -> float:
+    """Spot mark + Funding USDT + UM Futures free USDT (idle capital)."""
+    total = spot_book_equity()
+    fund = funding_usdt_free()
+    fut = futures_usdt_available()
+    # Avoid double-count if already in spot path (they're separate wallets)
+    total += max(fund, 0.0) + max(fut, 0.0)
+    return total
+
+
+def free_spot_usdt() -> float:
+    for b in spot_balances():
+        if str(b.get("asset") or "") == "USDT":
+            return float(b.get("free") or 0)
+    return 0.0
+
+
+def salvage_usdt_to_spot(*, force: bool = False) -> dict[str, float]:
+    """Pull idle Funding + Futures USDT back to MAIN Spot.
+
+    Skips Futures salvage when an ETH futures position is open or scalper
+    has a live position (margin in use).
+    """
+    global _LAST_SALVAGE_TS
+    now = time.time()
+    if not force and (now - _LAST_SALVAGE_TS) < SALVAGE_COOLDOWN_SEC:
+        return {}
+    _LAST_SALVAGE_TS = now
+    moved: dict[str, float] = {}
+    ex, _, _ = _exchange()
+
+    fund = funding_usdt_free()
+    if fund >= 1.0:
+        amt = round(fund * 0.999, 8)
+        try:
+            ex.request(
+                "asset/transfer",
+                "sapi",
+                "POST",
+                {"type": "FUNDING_MAIN", "asset": "USDT", "amount": f"{amt}"},
+            )
+            moved["funding"] = amt
+            print(f"SALVAGE_FUNDING_MAIN {amt}", flush=True)
+            time.sleep(0.8)
+        except Exception as exc:  # noqa: BLE001
+            print(f"SALVAGE_FUNDING_FAIL {exc}", flush=True)
+
+    if not futures_eth_open() and not scalp_has_position():
+        fut = futures_usdt_available()
+        if fut >= 1.0:
+            amt = round(min(fut * 0.99, fut - 0.05), 4)
+            if amt >= 1.0:
+                try:
+                    ex.request(
+                        "asset/transfer",
+                        "sapi",
+                        "POST",
+                        {"type": "UMFUTURE_MAIN", "asset": "USDT", "amount": f"{amt:.4f}"},
+                    )
+                    moved["futures"] = amt
+                    print(f"SALVAGE_UMFUTURE_MAIN {amt}", flush=True)
+                    time.sleep(0.8)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"SALVAGE_FUTURES_FAIL {exc}", flush=True)
+    return moved

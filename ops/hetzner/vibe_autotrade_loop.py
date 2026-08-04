@@ -396,6 +396,15 @@ def atr_pct(klines: list, n: int = 14) -> float:
 
 
 def book_equity() -> float:
+    """Full Binance book: Spot (+Earn LD*) + Funding USDT + idle Futures USDT."""
+    try:
+        import binance_wallets as bw
+
+        # Prefer pulling stranded USDT back so usable cash matches equity
+        bw.salvage_usdt_to_spot(force=False)
+        return float(bw.total_book_equity())
+    except Exception as exc:  # noqa: BLE001
+        log(f"BOOK_EQUITY_MULTI_FAIL {exc}")
     from src.trading.connectors.binance import sdk as bn
 
     cfg = bn.load_config()
@@ -419,6 +428,13 @@ def book_equity() -> float:
 
 
 def free_usdt() -> float:
+    try:
+        import binance_wallets as bw
+
+        bw.salvage_usdt_to_spot(force=False)
+        return float(bw.free_spot_usdt())
+    except Exception:
+        pass
     from src.trading.connectors.binance import sdk as bn
 
     cfg = bn.load_config()

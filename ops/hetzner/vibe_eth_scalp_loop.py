@@ -999,25 +999,32 @@ def close_position(st: dict, kind: str, pnl_pct: float) -> None:
                 log(f"FUTURES_CLOSE {close_side} {order.get('id')}")
             except Exception as exc:  # noqa: BLE001
                 log(f"FUTURES_CLOSE_FAIL {exc}")
-        # try transfer back
+        # try transfer back (full salvage helper)
         try:
-            from src.trading.connectors.binance import sdk as bn
+            import binance_wallets as bw
 
-            cfg = bn.load_config()
-            ex = bn._exchange(cfg)
-            fut = futures_ex()
-            if fut:
-                fb = fut.fetch_balance()
-                amt = float((fb.get("free") or {}).get("USDT") or 0)
-                if amt > 1:
-                    ex.request(
-                        "asset/transfer",
-                        "sapi",
-                        "POST",
-                        {"type": "UMFUTURE_MAIN", "asset": "USDT", "amount": f"{amt * 0.99:.4f}"},
-                    )
+            moved = bw.salvage_usdt_to_spot(force=True)
+            log(f"FUT_REPAT {moved}")
         except Exception as exc:  # noqa: BLE001
             log(f"FUT_REPAT_TRANSFER_FAIL {exc}")
+            try:
+                from src.trading.connectors.binance import sdk as bn
+
+                cfg = bn.load_config()
+                ex = bn._exchange(cfg)
+                fut = futures_ex()
+                if fut:
+                    fb = fut.fetch_balance()
+                    amt = float((fb.get("free") or {}).get("USDT") or 0)
+                    if amt > 1:
+                        ex.request(
+                            "asset/transfer",
+                            "sapi",
+                            "POST",
+                            {"type": "UMFUTURE_MAIN", "asset": "USDT", "amount": f"{amt * 0.99:.4f}"},
+                        )
+            except Exception as exc2:  # noqa: BLE001
+                log(f"FUT_REPAT_FALLBACK_FAIL {exc2}")
     else:
         qty = float(pos.get("qty") or 0)
         free = free_asset("ETH")
@@ -1316,6 +1323,17 @@ def tick() -> None:
         orch.evaluate_and_update(notify=True)
     except Exception as exc:  # noqa: BLE001
         log(f"ORCH_FAIL {exc}")
+
+    # Idle: pull Funding/Futures USDT back to Spot so v6 sees cash
+    if not st.get("position"):
+        try:
+            import binance_wallets as bw
+
+            moved = bw.salvage_usdt_to_spot(force=False)
+            if moved:
+                log(f"SALVAGE_IDLE {moved}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"SALVAGE_FAIL {exc}")
 
     # probe futures once / refresh flags when OK
     fut = futures_ex()

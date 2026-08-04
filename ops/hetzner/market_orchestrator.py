@@ -162,25 +162,51 @@ def _eth_metrics() -> dict[str, Any]:
 
 
 def _book_day_pnl_pct() -> tuple[float, float, float]:
-    """Returns day_pnl_pct, equity, day_open from autotrade goals / snap."""
+    """Returns day_pnl_pct, equity, day_open — prefer live book, not stale snap."""
     st = _load_json(AUTOTRADE_STATE)
-    eq = float(st.get("equity") or 0)
     g = st.get("goals") or {}
-    day_open = float(g.get("day_open_equity") or eq or 1)
-    # prefer live portfolio if available
+    day_open = float(g.get("day_open_equity") or 0)
+    eq = float(st.get("equity") or 0)
+
+    # Live multi-wallet equity (Spot+Funding+Futures idle)
     try:
-        snap = _load_json(HOME / "telegram_portfolio_snap.json")
-        if snap.get("total"):
-            eq = float(snap["total"])
+        import binance_wallets as bw
+
+        live = float(bw.total_book_equity())
+        if live > 0:
+            eq = live
     except Exception:
         pass
+
+    # Snap only if fresh (<12 min) and within 12% of live/state (anti-cliff)
+    try:
+        snap = _load_json(HOME / "telegram_portfolio_snap.json")
+        snap_eq = float(snap.get("total") or 0)
+        snap_ts = float(snap.get("ts") or 0)
+        age = time.time() - snap_ts if snap_ts else 1e9
+        if snap_eq > 0 and age < 12 * 60:
+            base = eq if eq > 0 else snap_eq
+            if base > 0 and abs(snap_eq - base) / base <= 0.12:
+                eq = snap_eq
+    except Exception:
+        pass
+
+    if day_open <= 0:
+        day_open = eq if eq > 0 else 1.0
     pnl_pct = ((eq - day_open) / day_open * 100.0) if day_open > 0 else 0.0
     return pnl_pct, eq, day_open
 
 
 def _usable_usdt(eth_m: dict) -> float:
-    """Approx USDT v6 can use: free minus scalp reserve when in play."""
+    """Approx USDT v6 can use: free Spot after salvage, minus scalp reserve."""
     usdt = float(eth_m.get("eth_usdt") or 0)
+    try:
+        import binance_wallets as bw
+
+        bw.salvage_usdt_to_spot(force=False)
+        usdt = max(usdt, float(bw.free_spot_usdt()))
+    except Exception:
+        pass
     if eth_m.get("eth_has_pos") or eth_m.get("eth_active_float"):
         return max(0.0, usdt - 5.0)
     return usdt

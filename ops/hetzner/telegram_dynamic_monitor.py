@@ -131,6 +131,14 @@ def _underlying_asset(code: str) -> tuple[str, str]:
 def portfolio() -> tuple[float, dict[str, float], list[str]]:
     from src.trading.connectors.binance import sdk as bn
 
+    # Salvage stranded USDT so Telegram total matches tradeable Spot
+    try:
+        import binance_wallets as bw
+
+        bw.salvage_usdt_to_spot(force=False)
+    except Exception as exc:  # noqa: BLE001
+        print("PORTFOLIO_SALVAGE_WARN", exc)
+
     cfg = bn.load_config()
     acc = bn.get_account_snapshot(cfg)
     # Aggregate by underlying (Spot + Earn Flexible LD*).
@@ -146,6 +154,17 @@ def portfolio() -> tuple[float, dict[str, float], list[str]]:
         # Prefer Earn label if any sleeve is in Earn; else spot code.
         if "(Earn)" in label or under not in labels:
             labels[under] = label if under in held and held[under] == qty else under
+
+    # Include Funding + idle UM Futures USDT in USDT sleeve / total
+    try:
+        import binance_wallets as bw
+
+        extra = float(bw.funding_usdt_free()) + float(bw.futures_usdt_available())
+        if extra > 0:
+            held["USDT"] = float(held.get("USDT") or 0) + extra
+            labels.setdefault("USDT", "USDT")
+    except Exception as exc:  # noqa: BLE001
+        print("PORTFOLIO_EXTRA_USDT_WARN", exc)
 
     total = 0.0
     parts: list[str] = []

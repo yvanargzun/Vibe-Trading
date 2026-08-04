@@ -9,14 +9,28 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+DAY_TZ = ZoneInfo("America/Mexico_City")
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def local_now() -> datetime:
+    return datetime.now(DAY_TZ)
+
+
 def utc_day() -> str:
     return utc_now().date().isoformat()
+
+
+def goal_day(venue: str = "alpaca") -> str:
+    """Binance live book uses Ciudad de Mexico day boundary; others UTC."""
+    if (venue or "").lower() == "binance":
+        return local_now().date().isoformat()
+    return utc_day()
 
 
 def utc_week() -> str:
@@ -24,6 +38,14 @@ def utc_week() -> str:
     d = utc_now().date()
     iso = d.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
+
+
+def goal_week(venue: str = "alpaca") -> str:
+    if (venue or "").lower() == "binance":
+        d = local_now().date()
+        iso = d.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+    return utc_week()
 
 
 def pick_profile(equity: float, venue: str = "alpaca") -> str:
@@ -90,8 +112,8 @@ def ensure_goals(
     """Initialize / roll day-week windows. Mutates state['goals']."""
     profile = pick_profile(equity, venue)
     g = dict(state.get("goals") or {})
-    day = utc_day()
-    week = utc_week()
+    day = goal_day(venue)
+    week = goal_week(venue)
 
     # Day roll
     if g.get("day") != day:
