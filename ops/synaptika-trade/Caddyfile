@@ -1,0 +1,27 @@
+synaptika-trade.duckdns.org {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy ops:8787
+	}
+
+	handle /static/* {
+		reverse_proxy ops:8787
+	}
+
+	handle /ops* {
+		reverse_proxy ops:8787
+	}
+
+	handle_path /chat* {
+		reverse_proxy open-webui:8080
+	}
+
+	handle / {
+		reverse_proxy ops:8787
+	}
+
+	handle {
+		reverse_proxy ops:8787
+	}
+}

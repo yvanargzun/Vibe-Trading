@@ -1,0 +1,62 @@
+# Synaptika Trade portal (Open WebUI + Ops) behind Caddy + DuckDNS
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - open-webui
+      - ops
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    environment:
+      - WEBUI_NAME=Synaptika Trade
+      - WEBUI_URL=https://synaptika-trade.duckdns.org/chat
+      - ENABLE_SIGNUP=true
+      - DEFAULT_USER_ROLE=admin
+      - ENV=prod
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - open_webui:/app/backend/data
+      - ./brand/logo-icon.png:/app/backend/open_webui/static/favicon.png:ro
+      - ./brand/logo-icon.png:/app/backend/open_webui/static/static/favicon.png:ro
+      - ./brand/logo-wordmark.png:/app/backend/open_webui/static/splash.png:ro
+      - ./brand/logo-icon.png:/app/backend/open_webui/static/logo.png:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  ops:
+    build: ./ops_panel
+    restart: unless-stopped
+    environment:
+      - OPS_HOME=/data
+      - VIBE_HOME=/data/vibe
+      - ALPACA_HOME=/data/alpaca
+      - OPS_PASSWORD=${OPS_PASSWORD:-changeme}
+      - OPS_SECRET=${OPS_SECRET:-synaptika-ops-secret}
+      - BRAND_NAME=Synaptika Trade
+      - BRAND_DIR=/brand
+    volumes:
+      - ./ops_panel/app.py:/app/app.py:ro
+      - ./brand:/brand:ro
+      - /root/.vibe-trading:/data/vibe:ro
+      - /root/.alpaca-paper:/data/alpaca:ro
+      - /root/synaptika-trade/ops_audit.jsonl:/data/ops_audit.jsonl
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8787:8787"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  open_webui:
