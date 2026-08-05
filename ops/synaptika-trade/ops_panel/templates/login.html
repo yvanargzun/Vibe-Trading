@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{{ brand }} · Entrar</title>
+  <link rel="icon" href="/static/brand/logo-icon.png"/>
+  <link rel="stylesheet" href="/static/ops/ops.css"/>
+</head>
+<body>
+  <main>
+    <div class="login">
+      <div class="brand-row">
+        <img class="icon" src="/static/brand/logo-icon.png" alt=""/>
+        <strong>{{ brand }}</strong>
+      </div>
+      <p class="lead">Entra para ver el bot en vivo y abrir el copiloto.</p>
+      {% if error %}<p class="err">{{ error }}</p>{% endif %}
+      <form method="post" action="/login">
+        <label>Contraseña</label>
+        <input type="password" name="password" autofocus required/>
+        <button class="btn" type="submit">Entrar</button>
+      </form>
+    </div>
+  </main>
+  <footer>{{ brand }} · synaptika-trade.duckdns.org</footer>
+</body>
+</html>

@@ -601,14 +601,21 @@ def dust_to_bnb(only_assets: list[str] | None = None, max_usd: float = 1.0) -> b
         return False
 
 
-def market_sell_raw(asset: str, need_usd: float | None = None, sell_all: bool = False) -> bool:
+def market_sell_raw(
+    asset: str,
+    need_usd: float | None = None,
+    sell_all: bool = False,
+    *,
+    state: dict | None = None,
+    reason: str = "FUND",
+) -> bool:
     """Raw market sell (funding / emergency). Does NOT consume mandate daily count."""
     from src.trading.connectors.binance import sdk as bn
 
     if asset in _tick_sold or asset in _tick_fund_sold:
         return False
-    cfg = bn.load_config()
-    ex = bn._exchange(cfg)
+    cfg_bn = bn.load_config()
+    ex = bn._exchange(cfg_bn)
     symbol = f"{asset}/USDT"
     try:
         ex.load_markets()
@@ -638,36 +645,148 @@ def market_sell_raw(asset: str, need_usd: float | None = None, sell_all: bool = 
             log(f"FUND_SELL_SKIP {asset} qty={qty} < min_amt={min_amt}")
             _tick_fund_sold.add(asset)
             return False
-        if qty <= 0 or qty * px < MIN_EXIT_USD * 0.99:
-            log(f"FUND_SELL_SKIP {asset} notional={qty * px:.4f}")
+        usd = qty * px
+        if qty <= 0 or usd < MIN_EXIT_USD * 0.99:
+            log(f"FUND_SELL_SKIP {asset} notional={usd:.4f}")
             _tick_fund_sold.add(asset)
             return False
         order = ex.create_order(symbol, "market", "sell", qty)
-        log(f"FUND_SELL {asset} qty={qty} id={order.get('id')}")
+        log(f"FUND_SELL {asset} qty={qty} id={order.get('id')} reason={reason}")
         _tick_fund_sold.add(asset)
+        _record_raw_sell_event(asset, px=px, usd=usd, state=state, reason=reason)
         time.sleep(2)
         return True
     except Exception as exc:  # noqa: BLE001
         msg = str(exc)
         log(f"FUND_SELL_FAIL {asset} {msg}")
-        # Don't thrash the same dust every tick
         if "minimum amount" in msg.lower() or "precision" in msg.lower():
             _tick_fund_sold.add(asset)
         return False
 
 
-def ensure_spot_usdt(need: float, state: dict) -> float:
-    """Fund USDT without dumping tracked strategy legs when possible."""
+def _record_raw_sell_event(
+    asset: str,
+    *,
+    px: float,
+    usd: float,
+    state: dict | None,
+    reason: str,
+) -> None:
+    try:
+        import market_orchestrator as orch
+        import trade_events as te
+
+        pnl_pct = None
+        result = None
+        meta = {}
+        if state:
+            meta = (state.get("positions") or {}).get(asset) or {}
+            entry = float(meta.get("entry") or 0)
+            if entry > 0 and px > 0:
+                pnl_pct = (px / entry) - 1.0
+            else:
+                result = "flat"
+                reason = f"{reason}|untracked"
+        else:
+            result = "flat"
+            reason = f"{reason}|untracked"
+        te.record_trade_event(
+            bot="v6",
+            side="sell",
+            symbol=asset,
+            price=float(px),
+            usd=float(usd),
+            mode=orch.current_mode(),
+            regime=str((state or {}).get("regime") or ""),
+            pnl_pct=pnl_pct,
+            result=result,
+            equity=book_equity(),
+            reason=reason,
+            kind=reason.split("|")[0][:40],
+        )
+        if state and asset in (state.get("positions") or {}):
+            positions = dict(state.get("positions") or {})
+            positions.pop(asset, None)
+            state["positions"] = positions
+            save_state(state)
+    except Exception as exc:  # noqa: BLE001
+        log(f"TRADE_EVENT_FAIL fund_sell {exc}")
+
+
+def _opened_age_sec(meta: dict) -> float | None:
+    opened = meta.get("opened_ts")
+    if opened is None:
+        return None
+    try:
+        if isinstance(opened, (int, float)):
+            ts = float(opened)
+            if ts > 1e12:
+                ts /= 1000.0
+            if ts > 1e9:
+                return max(0.0, time.time() - ts)
+        raw = str(opened).replace("Z", "+00:00")
+        dtp = datetime.fromisoformat(raw)
+        if dtp.tzinfo is None:
+            dtp = dtp.replace(tzinfo=timezone.utc)
+        return max(0.0, time.time() - dtp.timestamp())
+    except Exception:
+        return None
+
+
+def _leg_is_young(meta: dict) -> bool:
+    age = _opened_age_sec(meta)
+    if age is None:
+        return False
+    return age < float(cfg.YOUNG_LEG_SEC)
+
+
+def _leg_in_trail(meta: dict, px: float) -> bool:
+    entry = float(meta.get("entry") or 0)
+    peak = float(meta.get("peak") or entry or 0)
+    if entry <= 0 or px <= 0:
+        return False
+    return peak >= entry * (1 + TRAIL_ACT)
+
+
+def _fund_sell_allowed(
+    asset: str,
+    meta: dict,
+    h: dict,
+    *,
+    allow_last_resort: bool,
+) -> bool:
+    """Whether ensure_spot_usdt may sell this asset at this stage."""
+    if asset in _tick_sold or asset in _tick_fund_sold:
+        return False
+    usd = float(h.get("usd") or 0)
+    if usd < MIN_EXIT_USD:
+        return False
+    if not meta:
+        return True  # idle / untracked
+    px = float(h.get("px") or 0)
+    entry = float(meta.get("entry") or 0)
+    pnl = (px / entry - 1.0) if entry > 0 and px > 0 else 0.0
+    if _leg_is_young(meta) or _leg_in_trail(meta, px):
+        return False
+    age = _opened_age_sec(meta)
+    aged_ok = age is not None and age >= COOLDOWN_HOURS * 3600
+    loss_ok = pnl <= -(SL * 0.5)
+    if aged_ok or loss_ok:
+        return True
+    return bool(allow_last_resort)
+
+
+def ensure_spot_usdt(
+    need: float,
+    state: dict,
+    *,
+    allow_last_resort: bool = False,
+) -> float:
+    """Fund USDT without dumping young/trail strategy legs when possible."""
     free = usable_usdt_for_v6()
     if free >= need:
         return free_usdt()
 
-    protected = {
-        a
-        for a, meta in (state.get("positions") or {}).items()
-        if float((meta or {}).get("usd") or 0) >= MIN_EXIT_USD or float(meta.get("usd") or 0) >= 0.5
-    }
-    # Prefer protecting exitable legs strongly
     hard_protect = {
         a
         for a, meta in (state.get("positions") or {}).items()
@@ -683,15 +802,28 @@ def ensure_spot_usdt(need: float, state: dict) -> float:
     if free >= need:
         return free_usdt()
 
-    # 2) Dust true dust (<$1), then sell BNB only if not a hard-protected strategy leg
+    # 2) Dust then BNB if not hard-protected young
     dust_to_bnb(max_usd=1.0)
-    if "BNB" not in hard_protect:
-        market_sell_raw("BNB", need_usd=need - usable_usdt_for_v6())
+    bnb_meta = (state.get("positions") or {}).get("BNB") or {}
+    if "BNB" not in hard_protect or _fund_sell_allowed(
+        "BNB", bnb_meta, {"usd": 99, "px": 1}, allow_last_resort=False
+    ):
+        # only sell BNB if not a young/trail strategy leg
+        if "BNB" not in hard_protect or (
+            not _leg_is_young(bnb_meta)
+            and not _leg_in_trail(bnb_meta, float(bnb_meta.get("peak") or 0) or 1.0)
+        ):
+            market_sell_raw(
+                "BNB",
+                need_usd=need - usable_usdt_for_v6(),
+                state=state,
+                reason="FUND_BNB",
+            )
     free = usable_usdt_for_v6()
     if free >= need:
         return free_usdt()
 
-    # 3) Redeem earn majors/alts then sell non-tracked (ETH fair game)
+    # 3) Redeem earn then sell idle / aged tracked
     for asset in ("FDUSD",) + FUND_ASSETS + ("BTC", "BNB", "ETH"):
         free = usable_usdt_for_v6()
         if free >= need:
@@ -699,32 +831,64 @@ def ensure_spot_usdt(need: float, state: dict) -> float:
         redeem_flexible(asset, redeem_all=True)
 
     holdings = spot_holdings()
-    # Sell non-tracked / non-hard-protected first
+    # Prefer untracked first
     for asset, h in sorted(holdings.items(), key=lambda kv: kv[1]["usd"]):
         free = usable_usdt_for_v6()
         if free >= need:
             return free_usdt()
-        if asset in hard_protect:
-            continue
-        if asset in _tick_sold:
-            continue
+        meta = (state.get("positions") or {}).get(asset) or {}
+        if meta and float(meta.get("usd") or h["usd"] or 0) >= MIN_EXIT_USD:
+            continue  # tracked — second pass
         if h["usd"] < MIN_EXIT_USD:
             continue
-        market_sell_raw(asset, need_usd=need - usable_usdt_for_v6())
+        market_sell_raw(
+            asset,
+            need_usd=need - usable_usdt_for_v6(),
+            state=state,
+            reason="FUND_IDLE",
+        )
+
+    # Tracked aged / mid-loss (never young/trail)
+    for asset, h in sorted(holdings.items(), key=lambda kv: kv[1]["usd"]):
+        free = usable_usdt_for_v6()
+        if free >= need:
+            return free_usdt()
+        meta = (state.get("positions") or {}).get(asset) or {}
+        if not meta:
+            continue
+        if not _fund_sell_allowed(asset, meta, h, allow_last_resort=False):
+            continue
+        market_sell_raw(
+            asset,
+            need_usd=need - usable_usdt_for_v6(),
+            state=state,
+            reason="FUND_AGED",
+        )
 
     free = usable_usdt_for_v6()
     if free >= need:
         return free_usdt()
 
-    # 4) Last resort: sell protected strategy legs
-    for asset in list(hard_protect):
-        free = usable_usdt_for_v6()
-        if free >= need:
-            break
-        if asset in _tick_sold:
-            continue
-        log(f"FUND_SELL_LAST_RESORT {asset}")
-        market_sell_raw(asset, need_usd=need - usable_usdt_for_v6())
+    # 4) Last resort only when explicitly allowed (recap / usable stuck)
+    if allow_last_resort:
+        for asset in list(hard_protect):
+            free = usable_usdt_for_v6()
+            if free >= need:
+                break
+            meta = (state.get("positions") or {}).get(asset) or {}
+            h = holdings.get(asset) or spot_holdings().get(asset)
+            if not h:
+                continue
+            if _leg_is_young(meta) or _leg_in_trail(meta, float(h.get("px") or 0)):
+                log(f"FUND_SELL_LAST_RESORT_SKIP {asset} young_or_trail")
+                continue
+            log(f"FUND_SELL_LAST_RESORT {asset}")
+            market_sell_raw(
+                asset,
+                need_usd=need - usable_usdt_for_v6(),
+                state=state,
+                reason="FUND_LAST_RESORT",
+            )
 
     return free_usdt()
 
@@ -867,7 +1031,38 @@ def sync_positions(state: dict) -> dict[str, dict[str, float]]:
     holdings = spot_holdings()
     positions = dict(state.get("positions") or {})
     for asset in list(positions.keys()):
+        prev = positions.get(asset) or {}
         if asset not in holdings or holdings[asset]["usd"] < 0.4:
+            # Leg vanished without execute_sell — audit it
+            try:
+                import market_orchestrator as orch
+                import trade_events as te
+
+                entry = float(prev.get("entry") or 0)
+                last_usd = float(prev.get("usd") or 0)
+                px = entry if entry > 0 else 0.0
+                pnl_pct = None
+                result = "unknown"
+                if asset in holdings and holdings[asset]["usd"] < 0.4 and entry > 0:
+                    px = float(holdings[asset].get("px") or entry)
+                    pnl_pct = (px / entry) - 1.0
+                    result = None  # derive from pnl
+                te.record_trade_event(
+                    bot="v6",
+                    side="sell",
+                    symbol=asset,
+                    price=float(px or 0),
+                    usd=float(last_usd or 0),
+                    mode=orch.current_mode(),
+                    regime=str(state.get("regime") or ""),
+                    pnl_pct=pnl_pct,
+                    result=result,
+                    equity=book_equity(),
+                    reason="SYNC_VANISH",
+                    kind="SYNC",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log(f"TRADE_EVENT_FAIL sync_vanish {asset} {exc}")
             positions.pop(asset, None)
     for asset, h in holdings.items():
         prev = positions.get(asset) or {}
@@ -1118,18 +1313,50 @@ def execute_sell(
 
     log(f"{tag} {pair} qty={qty} {exit_c['reason']} pnl={exit_c['pnl']*100:.2f}%")
     if emergency:
-        ok = market_sell_raw(asset, sell_all=True)
+        ok = market_sell_raw(asset, sell_all=True, state=state, reason="EMERGENCY")
         # market_sell_raw logs FUND_SELL; rewrite intent in log already via tag above
         result = {"status": "ok"} if ok else {"status": "error"}
         # avoid double fund tag confusion
         if ok:
             log(f"EMERGENCY_EXIT_OK {asset}")
+            _tick_sold.add(asset)
+            # market_sell_raw already recorded trade event + popped position
+            set_cooldown(state, asset)
+            state["last_symbol"] = f"-{asset}"
+            recent = list(state.get("recent_symbols") or [])
+            recent.append(f"-{asset}")
+            state["recent_symbols"] = recent[-8:]
+            exits = list(state.get("exits") or [])
+            exits.append(
+                {
+                    "ts": utc_ts(),
+                    "asset": asset,
+                    "reason": exit_c["reason"],
+                    "kind": exit_c["kind"],
+                    "pnl_pct": round(exit_c["pnl"] * 100, 2),
+                    "emergency": emergency,
+                }
+            )
+            state["exits"] = exits[-30:]
+            save_state(state)
+            tg(
+                format_sell_tg(
+                    base=asset,
+                    usd=float(exit_c.get("usd") or h["usd"]),
+                    pnl_pct=float(exit_c["pnl"]),
+                    kind=str(exit_c.get("kind") or ""),
+                    emergency=emergency,
+                    state=state,
+                )
+            )
+            return True
+        return False
     else:
         result = place_gate_order(pair, "sell", quantity=qty)
 
     status = result.get("status") or result.get("denied_reason") or result.get("error") or result
     log(f"{tag}_RESULT {pair} {status}")
-    if not order_succeeded(result) and not (emergency and result.get("status") == "ok"):
+    if not order_succeeded(result):
         return False
 
     _tick_sold.add(asset)
@@ -1168,6 +1395,8 @@ def execute_sell(
             regime=str(state.get("regime") or ""),
             pnl_pct=float(exit_c["pnl"]),
             equity=book_equity(),
+            reason=str(exit_c.get("reason") or ""),
+            kind=str(exit_c.get("kind") or ""),
         )
     except Exception as exc:  # noqa: BLE001
         log(f"TRADE_EVENT_FAIL sell {exc}")
@@ -1351,13 +1580,18 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
         _trace_skip("halt")
         return False
     mode = orch.current_mode()
+    mode_doc = orch.load_mode()
+    feats = mode_doc.get("features") or {}
+    mode_reason = str(mode_doc.get("reason") or "")
+    eq_feats = float(feats.get("equity") or 0) or float(book_equity() or 0)
+    fee_lim = float(feats.get("fee_limit") or cfg.fee_notional_limit(eq_feats))
+
     if not orch.allows_v6_buys(mode):
-        feats = orch.load_mode().get("features") or {}
-        if float(feats.get("notional_frac") or 0) >= 0.40:
+        if float(feats.get("notional_frac") or 0) >= fee_lim:
             te.record_skip(
                 "SKIP_FEE_BUDGET",
                 bot="v6",
-                detail=f"frac={feats.get('notional_frac')}",
+                detail=f"frac={feats.get('notional_frac')} lim={fee_lim}",
                 mode=mode,
             )
             _trace_skip("fee_budget", mode=mode, frac=feats.get("notional_frac"))
@@ -1366,6 +1600,51 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
             _trace_skip("orch_mode", mode=mode)
         log(f"SKIP_MODE buy blocked mode={mode}")
         return False
+
+    # Win-rate tilt brake (no forced quota)
+    wr, wins, losses_d, rated = te.win_rate_today(bot="v6")
+    if (
+        rated >= int(cfg.MIN_CLOSES_FOR_WINRATE)
+        and wr is not None
+        and wr < float(cfg.MIN_WIN_RATE_CONTINUE)
+    ):
+        te.record_skip(
+            "SKIP_DAY_EDGE",
+            bot="v6",
+            detail=f"wr={wr:.2f} wins={wins} losses={losses_d} rated={rated}",
+            mode=mode,
+        )
+        _trace_skip("day_edge_fail", wr=wr, rated=rated)
+        log(f"SKIP_DAY_EDGE wr={wr:.2f} rated={rated}")
+        return False
+
+    # Soft / grace: at most one clip while those reasons are active
+    one_clip = (
+        "grace_1clip" in mode_reason
+        or "fee_budget_soft" in mode_reason
+        or "allow_one_clip" in mode_reason
+    )
+    if eq_feats > 0 and eq_feats < float(cfg.MIN_EQUITY_RECHARGE):
+        one_clip = True
+        if int(state.get("buys_today") or 0) >= int(cfg.GRACE_MAX_BUYS):
+            te.record_skip(
+                "SKIP_GRACE_FULL",
+                bot="v6",
+                detail=f"equity={eq_feats:.2f} buys={state.get('buys_today')}",
+                mode=mode,
+            )
+            log(f"SKIP_GRACE_FULL buys={state.get('buys_today')}")
+            return False
+    if one_clip and int(state.get("buys_today") or 0) >= 1:
+        te.record_skip(
+            "SKIP_ONE_CLIP",
+            bot="v6",
+            detail=mode_reason[:120],
+            mode=mode,
+        )
+        log("SKIP_ONE_CLIP already used today under soft/grace mode")
+        return False
+
     mandate = load_mandate("binance")
     if mandate is None:
         log("NO_MANDATE")
@@ -1636,12 +1915,29 @@ def tick() -> None:
         save_state(state)
         day_open = float((state.get("goals") or {}).get("day_open_equity") or eq_now)
         day_pnl_pct = ((eq_now - day_open) / day_open * 100.0) if day_open > 0 else 0.0
-        loss_halt_buys = day_pnl_pct <= DAY_LOSS_HALT_PCT
+        day_thr = cfg.day_loss_halt_pct(eq_now)
+        loss_halt_buys = day_pnl_pct <= day_thr
         usable = 0.0
         try:
             usable = float(usable_usdt_for_v6())
         except Exception as exc:  # noqa: BLE001
             log(f"USABLE_FAIL {exc}")
+
+        # Proactive unlock when powder is trapped in non-USDT
+        try:
+            import market_orchestrator as orch
+
+            md = orch.load_mode()
+            mreason = str(md.get("reason") or "")
+            if usable < MIN_USDT and eq_now >= MIN_EXIT_USD:
+                allow_lr = ("need_recharge" in mreason) or usable < 0.5
+                before = usable
+                ensure_spot_usdt(ORDER_USD, state, allow_last_resort=allow_lr)
+                usable = float(usable_usdt_for_v6())
+                if usable > before + 0.01:
+                    log(f"UNLOCK_USDT {before:.2f}->{usable:.2f} last_resort={allow_lr}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"UNLOCK_FAIL {exc}")
 
         modo = _orch_mode()
         holdings0 = sync_positions(state)
@@ -1658,8 +1954,8 @@ def tick() -> None:
             }
         )
         if loss_halt_buys:
-            log(f"DAY_LOSS_HALT_BUYS pnl_pct={day_pnl_pct:.2f}% (threshold {DAY_LOSS_HALT_PCT}%)")
-            tr.skip("day_loss_halt", day_pnl_pct=day_pnl_pct)
+            log(f"DAY_LOSS_HALT_BUYS pnl_pct={day_pnl_pct:.2f}% (threshold {day_thr}%)")
+            tr.skip("day_loss_halt", day_pnl_pct=day_pnl_pct, thr=day_thr)
 
         phase = "exit"
         tr.phase(phase)

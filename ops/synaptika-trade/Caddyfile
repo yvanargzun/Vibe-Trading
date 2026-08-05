@@ -1,27 +1,76 @@
-synaptika-trade.duckdns.org {
+# Ops on :443 / Open WebUI on :8443
+# Single login: Ops session → Caddy forward_auth → trusted headers into Open WebUI.
+
+synaptika-trade.duckdns.org:443 {
 	encode gzip
 
-	handle /api/* {
+	handle /static/brand/* {
 		reverse_proxy ops:8787
 	}
-
-	handle /static/* {
+	handle /static/ops/* {
 		reverse_proxy ops:8787
 	}
-
 	handle /ops* {
 		reverse_proxy ops:8787
 	}
-
-	handle_path /chat* {
-		reverse_proxy open-webui:8080
+	handle /login* {
+		reverse_proxy ops:8787
 	}
-
+	handle /logout {
+		reverse_proxy ops:8787
+	}
+	handle /healthz {
+		reverse_proxy ops:8787
+	}
 	handle / {
 		reverse_proxy ops:8787
 	}
-
 	handle {
 		reverse_proxy ops:8787
+	}
+}
+
+synaptika-trade.duckdns.org:8443 {
+	# Do not gzip websocket / SSE streams for Open WebUI chat
+	header {
+		Content-Security-Policy "frame-ancestors 'self' https://synaptika-trade.duckdns.org"
+		-X-Frame-Options
+	}
+
+	# Strip Upgrade/Connection on the auth subrequest — Flask/Werkzeug
+	# returns 400 if those websocket headers are forwarded, which breaks
+	# Socket.IO and makes the chat UI appear to hang.
+	forward_auth ops:8787 {
+		uri /ops/api/authcheck
+		copy_headers X-WebUI-Email X-WebUI-Name X-WebUI-Role
+		header_up -Upgrade
+		header_up -Connection
+		header_up -Sec-WebSocket-Key
+		header_up -Sec-WebSocket-Version
+		header_up -Sec-WebSocket-Extensions
+		header_up -Sec-WebSocket-Protocol
+	}
+
+	handle_errors {
+		@auth {
+			expression `{err.status_code} == 401`
+		}
+		handle @auth {
+			redir https://synaptika-trade.duckdns.org/login?next=/ops/chat 302
+		}
+	}
+
+	# Bootstrap page: trusted-header signin then redirect into the app
+	handle /__boot {
+		root * /srv/webui
+		rewrite * /boot.html
+		file_server
+	}
+
+	handle {
+		reverse_proxy open-webui:8080 {
+			# Explicit websocket support for Socket.IO chat events
+			flush_interval -1
+		}
 	}
 }

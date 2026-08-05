@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{{ brand }} · Chat</title>
+  <link rel="icon" href="/static/brand/logo-icon.png"/>
+  <link rel="stylesheet" href="/static/ops/ops.css?v=7"/>
+</head>
+<body class="chat-shell">
+  <header>
+    <div class="brand">
+      <img class="icon" src="/static/brand/logo-icon.png" alt=""/>
+      <div>
+        <img class="word" src="/static/brand/logo-wordmark.png" alt="{{ brand }}"/>
+        <div class="sub">Copiloto IA · mismo login de Ops</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a class="btn ghost sm" href="/ops">Volver a Ops</a>
+      <a class="btn ghost sm" href="/ops/historial">Historial</a>
+      <a class="btn ghost sm" href="/logout">Salir</a>
+    </div>
+  </header>
+  <div class="chat-frame-wrap">
+    <iframe
+      class="chat-frame"
+      title="Synaptika Trade Chat"
+      src="{{ chat_url }}"
+      allow="clipboard-read; clipboard-write"
+      referrerpolicy="no-referrer-when-downgrade"
+    ></iframe>
+  </div>
+</body>
+</html>

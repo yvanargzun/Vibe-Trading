@@ -29,14 +29,48 @@ FLIP_COOLDOWN_SEC = 20 * 60
 MAX_FLIPS_DAY = 4
 MODE_TG_COOLDOWN_SEC = 6 * 3600
 
-# --- thresholds ---
+# --- thresholds (capital floors; day-loss/fee from v6_config helpers) ---
 RECAP_USDT = 4.5
-RECAP_ETH_USD = 5.0
-STANDBY_DAY_PNL_PCT = -3.0
 STANDBY_BTC_1H = -2.5
 V6_USDT = 5.5
+# Legacy constant — prefer v6_config.fee_notional_limit(equity)
 FEE_NOTIONAL_FRAC = 0.55
 
+
+def _day_loss_thr(equity: float) -> float:
+    try:
+        import v6_config as v6c
+
+        return float(v6c.day_loss_halt_pct(equity))
+    except Exception:
+        return -3.0
+
+
+def _fee_limit(equity: float) -> float:
+    try:
+        import v6_config as v6c
+
+        return float(v6c.fee_notional_limit(equity))
+    except Exception:
+        return FEE_NOTIONAL_FRAC
+
+
+def _min_usdt() -> float:
+    try:
+        import v6_config as v6c
+
+        return float(v6c.MIN_USDT)
+    except Exception:
+        return 5.0
+
+
+def _min_equity_recharge() -> float:
+    try:
+        import v6_config as v6c
+
+        return float(v6c.MIN_EQUITY_RECHARGE)
+    except Exception:
+        return 50.0
 
 def _http_get(url: str) -> Any:
     with urllib.request.urlopen(url, timeout=20) as r:
@@ -214,25 +248,54 @@ def _usable_usdt(eth_m: dict) -> float:
 
 def propose_mode(features: dict[str, Any]) -> tuple[str, str]:
     usdt = float(features["usable_usdt"])
-    eth_usd = float(features["eth_usd"])
     day_pnl = float(features["day_pnl_pct"])
     btc_1h = float(features["btc_chg1h"])
     losses = int(features["loss_streak"])
     notional_frac = float(features["notional_frac"])
     btc_reg = str(features["btc_regime"])
+    equity = float(features.get("equity") or 0)
+    day_thr = float(features.get("day_loss_thr") or _day_loss_thr(equity))
+    fee_lim = float(features.get("fee_limit") or _fee_limit(equity))
+    min_u = _min_usdt()
+    recharge = _min_equity_recharge()
 
-    if usdt < RECAP_USDT and eth_usd < RECAP_ETH_USD:
-        return "recap", f"capital bajo usdt={usdt:.2f} eth_usd={eth_usd:.2f}"
-    if day_pnl <= STANDBY_DAY_PNL_PCT:
-        return "standby", f"day_pnl={day_pnl:.2f}%"
+    # Win-rate tilt brake (exits-only style via orch mode)
+    if features.get("day_edge_fail"):
+        return "recap", "day_edge_fail win_rate_below_min"
+
+    # Micro book: explicit recharge; one defensive grace clip if dry powder exists
+    if equity > 0 and equity < recharge:
+        if usdt >= min_u:
+            return (
+                "defensive",
+                f"need_recharge equity={equity:.2f}<{recharge:.0f} grace_1clip usdt={usdt:.2f}",
+            )
+        return (
+            "recap",
+            f"need_recharge equity={equity:.2f}<{recharge:.0f} usdt={usdt:.2f}",
+        )
+
+    # Capital thin — no ETH AND (scalper retired)
+    if usdt < RECAP_USDT:
+        return "recap", f"capital bajo usdt={usdt:.2f}"
+
+    if day_pnl <= day_thr:
+        return "standby", f"day_pnl={day_pnl:.2f}% thr={day_thr:.1f}%"
     if losses >= 3:
         return "standby", f"loss_streak={losses}"
     if btc_1h <= STANDBY_BTC_1H:
         return "standby", f"btc_1h={btc_1h:.2f}%"
-    if notional_frac >= FEE_NOTIONAL_FRAC:
+
+    # Fee soft: don't freeze forever — allow one defensive clip if powder exists
+    if notional_frac >= fee_lim:
+        if usdt >= min_u and day_pnl > day_thr:
+            return (
+                "defensive",
+                f"fee_budget_soft notional_frac={notional_frac:.2f}>={fee_lim:.2f} allow_one_clip",
+            )
         return "standby", f"fee_budget notional_frac={notional_frac:.2f}"
 
-    # No eth-dead gate — scalper retired; BTC + dry powder decides aggression
+    # BTC + dry powder decides aggression (never v6_primary under recharge — handled above)
     if btc_reg in ("bull", "trend") and usdt >= V6_USDT:
         return "v6_primary", f"btc={btc_reg} usdt={usdt:.2f}"
     if usdt >= V6_USDT:
@@ -240,8 +303,10 @@ def propose_mode(features: dict[str, Any]) -> tuple[str, str]:
     return "defensive", f"thin usdt={usdt:.2f} btc={btc_reg}"
 
 
-def _min_hold_for(mode: str) -> float:
+def _min_hold_for(mode: str, *, reason: str = "") -> float:
     if mode == "standby":
+        if "fee_budget" in (reason or ""):
+            return 15 * 60  # shorter trap for fee-only standbys
         return STANDBY_HOLD_SEC
     if mode == "recap":
         return RECAP_HOLD_SEC
@@ -297,6 +362,20 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
     denom = max(float(day_open or 0), float(eq or 0), 1.0)
     notional_frac = notional / denom
     losses = te.consecutive_losses()
+    day_thr = _day_loss_thr(eq)
+    fee_lim = _fee_limit(eq)
+
+    wr, wins, losses_d, rated = te.win_rate_today(bot="v6")
+    day_edge_fail = False
+    try:
+        import v6_config as v6c
+
+        min_closes = int(v6c.MIN_CLOSES_FOR_WINRATE)
+        min_wr = float(v6c.MIN_WIN_RATE_CONTINUE)
+    except Exception:
+        min_closes, min_wr = 2, 0.34
+    if rated >= min_closes and wr is not None and wr < min_wr:
+        day_edge_fail = True
 
     features = {
         **btc,
@@ -309,6 +388,13 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         "notional_frac": notional_frac,
         "loss_streak": losses,
         "eth_dead_sec": 0.0,
+        "day_loss_thr": day_thr,
+        "fee_limit": fee_lim,
+        "day_edge_fail": day_edge_fail,
+        "win_rate_today": wr,
+        "closes_rated_today": rated,
+        "wins_today": wins,
+        "losses_today": losses_d,
     }
     target, reason = propose_mode(features)
     cur = str(doc.get("mode") or "defensive")
@@ -316,17 +402,28 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
     held = now - since
     last_flip = float(doc.get("last_flip_ts") or 0)
     flips = int(doc.get("flips_today") or 0)
+    prev_reason = str(doc.get("reason") or "")
 
-    # Capital recovered: allow leaving standby even after max flips
-    recovery_ok = (
-        usable >= V6_USDT
-        and notional_frac < FEE_NOTIONAL_FRAC
-        and day_pnl > STANDBY_DAY_PNL_PCT
+    soft_fee_ok = (
+        usable >= _min_usdt()
+        and day_pnl > day_thr
         and losses < 3
         and float(features.get("btc_chg1h") or 0) > STANDBY_BTC_1H
     )
+    # Capital / soft-fee recovered: allow leaving standby even after max flips
+    recovery_ok = (
+        usable >= V6_USDT
+        and notional_frac < fee_lim
+        and day_pnl > day_thr
+        and losses < 3
+        and float(features.get("btc_chg1h") or 0) > STANDBY_BTC_1H
+    ) or (
+        soft_fee_ok
+        and ("fee_budget" in prev_reason or "fee_budget" in reason)
+        and target in ("defensive", "v6_primary")
+    )
 
-    # hard cap flips — do not trap forever in standby after inject/recovery
+    # hard cap flips — do not trap forever after inject/fee soft recovery
     if flips >= MAX_FLIPS_DAY and target != cur:
         if cur == "standby" and target in ("defensive", "v6_primary") and recovery_ok:
             pass
@@ -341,15 +438,17 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         allow = False  # no change
     elif _is_emergency(target):
         allow = True
-    elif held >= _min_hold_for(cur) and (now - last_flip) >= FLIP_COOLDOWN_SEC:
+    elif held >= _min_hold_for(cur, reason=prev_reason) and (now - last_flip) >= FLIP_COOLDOWN_SEC:
         allow = True
     elif cur in ("standby", "recap") and target in ("defensive", "v6_primary"):
-        # Exit idle modes early when dry powder / inject recovered
+        # Exit idle modes early when dry powder / soft-fee recovered
         if recovery_ok and held >= 5 * 60:
             allow = True
-        elif cur == "recap" and usable >= 5.0:
+        elif cur == "recap" and usable >= _min_usdt():
             allow = held >= 30 * 60
-        elif held >= _min_hold_for(cur):
+        elif "fee_budget" in prev_reason and soft_fee_ok and held >= 5 * 60:
+            allow = True
+        elif held >= _min_hold_for(cur, reason=prev_reason):
             allow = True
 
     changed = False
@@ -372,6 +471,48 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
     doc["features"] = features
     doc["updated_ts"] = now
     _save_mode(doc)
+
+    # Persist situations snapshot for Ops
+    try:
+        import strategy_feedback as sf
+
+        last_skip = None
+        try:
+            skip_path = HOME / "skip_events.jsonl"
+            if skip_path.exists():
+                for line in skip_path.read_text(encoding="utf-8").splitlines()[-8:]:
+                    try:
+                        sj = json.loads(line)
+                        if sj.get("bot") in ("v6", None, "binance"):
+                            last_skip = f"{sj.get('reason')}: {sj.get('detail') or ''}"
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        st_doc = _load_json(AUTOTRADE_STATE)
+        st_buys = int(st_doc.get("buys_today") or 0)
+        open_legs = sum(
+            1
+            for _a, meta in (st_doc.get("positions") or {}).items()
+            if float((meta or {}).get("usd") or 0) >= 0.5
+        )
+        sits = sf.build_situations(
+            mode=str(doc.get("mode") or ""),
+            reason=str(doc.get("reason") or ""),
+            features=features,
+            equity=eq,
+            usable=usable,
+            buys_today=st_buys,
+            open_legs=open_legs,
+            last_skip=last_skip,
+        )
+        sf.persist_situations(
+            sits,
+            extra={"mode": doc.get("mode"), "reason": doc.get("reason"), "equity": eq},
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"SITUATIONS_FAIL {exc}", flush=True)
+
     print(
         f"ORCH mode={doc['mode']} want={target} held={held/60:.1f}m "
         f"flips={doc['flips_today']} reason={doc['reason'][:80]}",
@@ -383,7 +524,11 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
 def _maybe_tg_mode(doc: dict, mode: str, reason: str, eq: float) -> None:
     now = time.time()
     last = float(doc.get("last_mode_tg_ts") or 0)
-    if now - last < MODE_TG_COOLDOWN_SEC:
+    # Recharge notices: allow sooner (2h)
+    cooldown = MODE_TG_COOLDOWN_SEC
+    if "need_recharge" in reason:
+        cooldown = 2 * 3600
+    if now - last < cooldown:
         return
     try:
         from telegram_notify_prefs import tg_api, load_env, filter_keyboard
@@ -391,6 +536,9 @@ def _maybe_tg_mode(doc: dict, mode: str, reason: str, eq: float) -> None:
         chat = load_env().get("TELEGRAM_CHAT_ID")
         if not chat:
             return
+        extra = ""
+        if "need_recharge" in reason:
+            extra = "\nDeposita USDT hasta equity ≥ $50 para salir de modo recarga."
         tg_api(
             "sendMessage",
             {
@@ -398,7 +546,8 @@ def _maybe_tg_mode(doc: dict, mode: str, reason: str, eq: float) -> None:
                 "text": (
                     f"[Orquestador] Modo → {mode}\n"
                     f"Por que: {reason}\n"
-                    f"Equity libro ~ ${eq:.2f}\n"
+                    f"Equity libro ~ ${eq:.2f}"
+                    f"{extra}\n"
                     "Gates activos; sin IA."
                 ),
                 "reply_markup": filter_keyboard(),

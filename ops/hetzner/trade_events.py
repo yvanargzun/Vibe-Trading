@@ -64,6 +64,8 @@ def record_trade_event(
     pnl_pct: float | None = None,
     result: str | None = None,
     equity: float | None = None,
+    reason: str | None = None,
+    kind: str | None = None,
 ) -> dict[str, Any]:
     """Persist fill and mirror a chart marker."""
     if result is None and pnl_pct is not None:
@@ -86,20 +88,24 @@ def record_trade_event(
         "regime": regime,
         "equity": None if equity is None else round(float(equity), 4),
     }
+    if reason:
+        row["reason"] = str(reason)[:120]
+    if kind:
+        row["kind"] = str(kind)[:40]
     _append_jsonl(TRADE_EVENTS, row, max_lines=MAX_TRADE_LINES)
 
     # Marker kind for charts
     if side == "buy":
-        kind = "buy"
+        kind_mark = "buy"
         label = f"BUY {symbol}"
     elif result == "win":
-        kind = "win"
+        kind_mark = "win"
         label = f"WIN {symbol}"
     elif result == "loss":
-        kind = "loss"
+        kind_mark = "loss"
         label = f"LOSS {symbol}"
     else:
-        kind = "sell"
+        kind_mark = "sell"
         label = f"SELL {symbol}"
 
     hist = SCALP_EQUITY_HISTORY if bot == "scalper" else EQUITY_HISTORY
@@ -109,7 +115,7 @@ def record_trade_event(
 
         ec.record_trade_marker(
             hist,
-            kind=kind,
+            kind=kind_mark,
             equity=eq,
             label=label,
             price=float(price),
@@ -120,7 +126,7 @@ def record_trade_event(
         if bot == "scalper" and hist != EQUITY_HISTORY:
             ec.record_trade_marker(
                 EQUITY_HISTORY,
-                kind=kind,
+                kind=kind_mark,
                 equity=eq,
                 label=label,
                 price=float(price),
@@ -129,7 +135,38 @@ def record_trade_event(
             )
     except Exception as exc:  # noqa: BLE001
         print(f"TRADE_MARK_FAIL {exc}", flush=True)
-    print(f"TRADE_MARK {bot} {kind} {symbol} usd={usd:.2f}", flush=True)
+    print(f"TRADE_MARK {bot} {kind_mark} {symbol} usd={usd:.2f}", flush=True)
+
+    # Ops/Telegram retro — only on closes when a recommendation is warranted
+    if side == "sell" and bot in ("v6", "binance", None, ""):
+        try:
+            import strategy_feedback as sf
+
+            feats: dict[str, Any] = {}
+            try:
+                mode_doc = json.loads(
+                    (HOME / "strategy_mode.json").read_text(encoding="utf-8")
+                )
+                feats = dict(mode_doc.get("features") or {})
+                feats["orch_reason"] = mode_doc.get("reason")
+            except Exception:
+                pass
+            sf.record_close_feedback(
+                bot=bot or "v6",
+                symbol=symbol,
+                result=result,
+                pnl_pct=pnl_pct if pnl_pct is not None else row.get("pnl_pct"),
+                usd=usd,
+                mode=mode,
+                reason=reason,
+                kind=kind,
+                equity=equity,
+                features=feats,
+                notify=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"FEEDBACK_FAIL {exc}", flush=True)
+
     return row
 
 
@@ -210,3 +247,46 @@ def consecutive_losses(limit: int = 10) -> int:
         elif res == "win":
             break
     return n
+
+
+def _utc_day_start() -> float:
+    from datetime import datetime, timezone
+
+    return (
+        datetime.now(timezone.utc)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .timestamp()
+    )
+
+
+def closes_today(*, bot: str | None = "v6") -> list[dict]:
+    """Sell events since UTC midnight (optionally filtered by bot)."""
+    start = _utc_day_start()
+    out: list[dict] = []
+    for ev in recent_trade_events(500):
+        if float(ev.get("ts") or 0) < start:
+            continue
+        if ev.get("side") != "sell":
+            continue
+        if bot is not None and ev.get("bot") not in (None, bot):
+            continue
+        out.append(ev)
+    return out
+
+
+def win_rate_today(*, bot: str | None = "v6") -> tuple[float | None, int, int, int]:
+    """Return (win_rate or None, wins, losses, closes_with_result)."""
+    wins = losses = rated = 0
+    for ev in closes_today(bot=bot):
+        res = ev.get("result")
+        if res == "win":
+            wins += 1
+            rated += 1
+        elif res == "loss":
+            losses += 1
+            rated += 1
+        elif res == "flat":
+            rated += 1
+    if rated <= 0:
+        return None, wins, losses, rated
+    return wins / rated, wins, losses, rated

@@ -1,0 +1,91 @@
+{
+  "binance": {
+    "id": "smart-fast-v6",
+    "title": "Binance Spot · smart-fast-v6",
+    "prompt": "PROMPT_V6 v2",
+    "summary": "Un solo agente Spot live: intradía RS/momentum, clip pequeño, maximiza usable USDT. ETH scalper retirado. Cuentas <$50: need_recharge + 1 clip grace. Fee soft y day-loss dinámico (−5% si equity<$100).",
+    "style": "Intradía · un leg · HOLD > overtrade · sin martingale ni average-down",
+    "universe": ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "LINK"],
+    "knobs": {
+      "clip_usd": 5.5,
+      "tp_pct": 3.0,
+      "sl_pct": 1.8,
+      "trail": "+2% / −1%",
+      "time_stop": "4h si PnL < +1.5%",
+      "min_hold": "25m (solo SL temprano)",
+      "max_legs": 1,
+      "max_buys_day": 4,
+      "target_buys_day": 2,
+      "min_equity_recharge": 50,
+      "grace_buys_under_recharge": 1,
+      "day_loss_halt_pct": "−5% si equity<$100, else −3%",
+      "fee_notional_frac": "0.80 si equity<$100, else 0.55 (soft→defensive)",
+      "min_win_rate_continue": 0.34,
+      "score_min": 3.5,
+      "score_bear": 4.0,
+      "cooldown": "4h/asset"
+    },
+    "gates": [
+      "orch.allows_v6_buys",
+      "score",
+      "usable_usdt",
+      "legs < 1",
+      "buys/day",
+      "grace/one_clip",
+      "win_rate_today",
+      "mandate room",
+      "data OK",
+      "min notional",
+      "not day_loss_halt"
+    ],
+    "tick": [
+      "0 salvage USDT + preflight mode/halt/cash/legs",
+      "1 régimen BTC bull|chop|bear",
+      "2 rank universo → ≤1 pick",
+      "3 gates → SKIP o size",
+      "4 exits antes de entries",
+      "5 journal + chart TG (CDMX)"
+    ]
+  },
+  "alpaca": {
+    "id": "canonical_v2",
+    "title": "Alpaca crypto · canonical_v2",
+    "prompt": "PROMPT_ALPACA_V2",
+    "summary": "Paper/live crypto Alpaca, un sleeve. Misma filosofía v6: intradía, clip fijo, day halt −3%. No dual-sleeve ni rotación multi-modo.",
+    "style": "Intradía · un leg · cash ≥ clip · sin overnight stack",
+    "universe": ["BTC", "ETH", "SOL", "DOGE", "LINK", "AVAX", "LTC", "UNI"],
+    "knobs": {
+      "clip_usd": 10.0,
+      "tp_pct": 3.0,
+      "sl_pct": 1.8,
+      "trail": "+2% / −1%",
+      "time_stop": "4h si PnL < +1.5%",
+      "min_hold": "25m",
+      "max_legs": 1,
+      "max_buys_day": 2,
+      "day_loss_halt_pct": -3.0,
+      "score_min": 3.5,
+      "score_bear": 4.0,
+      "cooldown": "4h/asset"
+    },
+    "gates": [
+      "not HALT",
+      "score",
+      "cash ≥ clip",
+      "legs < 1",
+      "buys/day",
+      "trades/day",
+      "data OK",
+      "min notional",
+      "not day_loss_halt"
+    ],
+    "tick": [
+      "0 preflight HALT/cash/legs/day_pnl",
+      "1 régimen",
+      "2 rank → ≤1 pick",
+      "3 gates",
+      "4 exits first",
+      "5 journal + chart"
+    ]
+  }
+}

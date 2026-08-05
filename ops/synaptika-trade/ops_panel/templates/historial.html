@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{{ brand }} · Historial chat</title>
+  <link rel="icon" href="/static/brand/logo-icon.png"/>
+  <link rel="stylesheet" href="/static/ops/ops.css?v=7"/>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img class="icon" src="/static/brand/logo-icon.png" alt=""/>
+      <div>
+        <img class="word" src="/static/brand/logo-wordmark.png" alt="{{ brand }}"/>
+        <div class="sub">Historial del chat IA · se guarda cada mensaje</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a class="btn ghost sm" href="/ops">Ops</a>
+      <a class="btn ghost sm" href="/ops/chat">Chat IA</a>
+      <a class="btn ghost sm" href="/logout">Salir</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero-actions">
+      <div>
+        <h1>Historial de conversaciones</h1>
+        <p class="lead">Todo lo que hablas con el copiloto se guarda automáticamente. Abre un chat para ver el hilo completo.</p>
+      </div>
+      <a class="btn" href="/ops/chat">Nuevo mensaje</a>
+    </section>
+
+    <section class="card">
+      <h2>Conversaciones ({{ chats|length }})</h2>
+      {% if chats %}
+      <table class="feed">
+        <thead>
+          <tr>
+            <th>Título</th>
+            <th>Actualizado</th>
+            <th>Msgs</th>
+            <th>Vista previa</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in chats %}
+          <tr>
+            <td>
+              <a href="/ops/historial/{{ c.id }}">{{ c.title or 'Sin título' }}</a>
+              {% if c.open_url %}
+                <div class="meta"><a href="{{ c.open_url }}" target="_blank" rel="noopener">Abrir en chat</a></div>
+              {% endif %}
+            </td>
+            <td class="num">{{ c.updated_at|ts_cdmx }}</td>
+            <td class="num">{{ c.message_count or '—' }}</td>
+            <td>{{ c.preview or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="meta">Aún no hay historial exportado. Escribe en el Chat IA y vuelve a esta página.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>Últimos turnos</h2>
+      {% if turns %}
+      <table class="feed">
+        <thead>
+          <tr>
+            <th>Cuándo</th>
+            <th>Chat</th>
+            <th>Tú</th>
+            <th>Copiloto</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for t in turns %}
+          <tr>
+            <td class="num">{{ t.ts|ts_cdmx }}</td>
+            <td>
+              {% if t.chat_id %}
+              <a href="/ops/historial/{{ t.chat_id }}">{{ t.title or t.chat_id }}</a>
+              {% else %}
+              {{ t.title or '—' }}
+              {% endif %}
+            </td>
+            <td>{{ (t.user or '')[:180] }}{% if (t.user or '')|length > 180 %}…{% endif %}</td>
+            <td>{{ (t.assistant or '')[:180] }}{% if (t.assistant or '')|length > 180 %}…{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="meta">Sin turnos registrados todavía.</p>
+      {% endif %}
+    </section>
+  </main>
+  <footer>{{ brand }} · historial</footer>
+</body>
+</html>

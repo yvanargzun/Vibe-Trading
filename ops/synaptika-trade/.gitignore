@@ -1,3 +1,5 @@
 secrets.env
 *.log
 ops_audit.jsonl
+chat_history/*
+!chat_history/.gitkeep

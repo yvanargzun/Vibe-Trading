@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Synaptika Chat</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:Segoe UI,system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:grid;place-items:center}
+    .box{text-align:center;max-width:22rem;padding:1.5rem}
+    .spin{width:28px;height:28px;border:3px solid #334155;border-top-color:#60a5fa;border-radius:50%;margin:0 auto 1rem;animation:s 0.8s linear infinite}
+    @keyframes s{to{transform:rotate(360deg)}}
+    a{color:#93c5fd}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="spin" aria-hidden="true"></div>
+    <div id="msg">Entrando al copiloto…</div>
+    <p id="err" style="display:none;color:#fca5a5;margin-top:1rem;font-size:.9rem"></p>
+  </div>
+  <script>
+    (async () => {
+      const msg = document.getElementById('msg');
+      const err = document.getElementById('err');
+      try {
+        // Trusted-header signin (Ops session → Caddy → X-WebUI-* headers)
+        const res = await fetch('/api/v1/auths/signin', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: '', password: '' })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.token) {
+          throw new Error((data && data.detail) ? JSON.stringify(data.detail) : ('HTTP ' + res.status));
+        }
+        localStorage.setItem('token', data.token);
+        msg.textContent = 'Listo, abriendo chat…';
+        location.replace('/');
+      } catch (e) {
+        msg.textContent = 'No se pudo entrar al chat';
+        err.style.display = 'block';
+        err.innerHTML = String(e.message || e) +
+          '<br><br>Vuelve a <a href="https://synaptika-trade.duckdns.org/login" target="_top">iniciar sesión en Ops</a> y reintenta.';
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{{ brand }} · {{ chat.title or 'Chat' }}</title>
+  <link rel="icon" href="/static/brand/logo-icon.png"/>
+  <link rel="stylesheet" href="/static/ops/ops.css?v=7"/>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img class="icon" src="/static/brand/logo-icon.png" alt=""/>
+      <div>
+        <img class="word" src="/static/brand/logo-wordmark.png" alt="{{ brand }}"/>
+        <div class="sub">Historial · {{ chat.title or 'Sin título' }}</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a class="btn ghost sm" href="/ops/historial">Volver</a>
+      <a class="btn ghost sm" href="/ops/chat">Chat IA</a>
+      {% if chat.open_url %}
+      <a class="btn sm" href="{{ chat.open_url }}" target="_blank" rel="noopener">Abrir en WebUI</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <main>
+    <section class="hero-actions">
+      <div>
+        <h1>{{ chat.title or 'Sin título' }}</h1>
+        <p class="lead">
+          {{ chat.message_count or (chat.messages|length) }} mensajes
+          · actualizado {{ chat.updated_at|ts_cdmx }}
+        </p>
+      </div>
+    </section>
+
+    <section class="card hist-thread">
+      {% for m in chat.messages or [] %}
+      <article class="hist-msg role-{{ m.role or 'unknown' }}">
+        <div class="hist-meta">
+          <strong>{{ 'Tú' if m.role == 'user' else ('Copiloto' if m.role == 'assistant' else (m.role or 'msg')) }}</strong>
+          <span>{{ m.timestamp|ts_cdmx }}</span>
+          {% if m.model %}<span class="meta">{{ m.model }}</span>{% endif %}
+        </div>
+        <pre class="hist-body">{{ m.content or '' }}</pre>
+      </article>
+      {% else %}
+      <p class="meta">Este chat no tiene mensajes exportados.</p>
+      {% endfor %}
+    </section>
+  </main>
+  <footer>{{ brand }} · historial</footer>
+</body>
+</html>
