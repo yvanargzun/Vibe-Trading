@@ -263,12 +263,26 @@ def propose_mode(features: dict[str, Any]) -> tuple[str, str]:
     if features.get("day_edge_fail"):
         return "recap", "day_edge_fail win_rate_below_min"
 
-    # Micro book: explicit recharge; one defensive grace clip if dry powder exists
+    # Micro book: explicit recharge; 1–2 defensive grace clips if dry powder exists
     if equity > 0 and equity < recharge:
         if usdt >= min_u:
+            try:
+                import v6_config as v6c
+
+                clip = float(v6c.ORDER_USD)
+                headroom = float(v6c.FEE_GRACE2_HEADROOM)
+            except Exception:
+                clip, headroom = 5.5, 0.08
+            grace2 = (
+                day_pnl > 0
+                and losses == 0
+                and usdt >= 2.0 * clip
+                and notional_frac < (fee_lim - headroom)
+            )
+            tag = "grace_2clip" if grace2 else "grace_1clip"
             return (
                 "defensive",
-                f"need_recharge equity={equity:.2f}<{recharge:.0f} grace_1clip usdt={usdt:.2f}",
+                f"need_recharge equity={equity:.2f}<{recharge:.0f} {tag} usdt={usdt:.2f}",
             )
         return (
             "recap",
@@ -364,6 +378,13 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
     losses = te.consecutive_losses()
     day_thr = _day_loss_thr(eq)
     fee_lim = _fee_limit(eq)
+    earn_usd = 0.0
+    try:
+        import binance_wallets as bw
+
+        earn_usd = float(bw.earn_locked_usd())
+    except Exception:
+        pass
 
     wr, wins, losses_d, rated = te.win_rate_today(bot="v6")
     day_edge_fail = False
@@ -395,6 +416,8 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         "closes_rated_today": rated,
         "wins_today": wins,
         "losses_today": losses_d,
+        "earn_locked_usd": round(earn_usd, 2),
+        "equity_usable_gap": round(max(0.0, float(eq or 0) - float(usable or 0)), 2),
     }
 
     # Ops Copiloto sticky lock — do not auto-flip mode
@@ -439,8 +462,12 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
     )
 
     # hard cap flips — do not trap forever after inject/fee soft recovery
+    # Micro recharge ping-pong (recap↔defensive) must not burn flip budget.
+    micro_book = eq > 0 and eq < _min_equity_recharge()
     if flips >= MAX_FLIPS_DAY and target != cur:
-        if cur == "standby" and target in ("defensive", "v6_primary") and recovery_ok:
+        if micro_book:
+            pass
+        elif cur == "standby" and target in ("defensive", "v6_primary") and recovery_ok:
             pass
         elif target != "standby":
             target, reason = "standby", f"max_flips={flips} force_standby"
@@ -468,8 +495,21 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
 
     changed = False
     if allow and target != cur:
-        # recovery flip does not burn another flip slot into permanent standby
-        bump = 0 if (cur == "standby" and recovery_ok and flips >= MAX_FLIPS_DAY) else 1
+        recharge_ish = (
+            "need_recharge" in reason
+            or "capital bajo" in reason
+            or "need_recharge" in prev_reason
+            or "capital bajo" in prev_reason
+        )
+        # recovery flip / micro recharge transitions do not burn flip slots
+        if cur == "standby" and recovery_ok and flips >= MAX_FLIPS_DAY:
+            bump = 0
+        elif recharge_ish or (
+            micro_book and ("need_recharge" in reason or "capital bajo" in reason)
+        ):
+            bump = 0
+        else:
+            bump = 1
         doc["mode"] = target
         doc["since_ts"] = now
         doc["last_flip_ts"] = now
@@ -498,7 +538,7 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
                 for line in skip_path.read_text(encoding="utf-8").splitlines()[-8:]:
                     try:
                         sj = json.loads(line)
-                        if sj.get("bot") in ("v6", None, "binance"):
+                        if sj.get("bot") in ("v6", None, "binance") and sj.get("bot") != "scalper":
                             last_skip = f"{sj.get('reason')}: {sj.get('detail') or ''}"
                     except Exception:
                         pass

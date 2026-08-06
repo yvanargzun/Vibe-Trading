@@ -31,6 +31,19 @@ ssh -i $env:USERPROFILE\.ssh\hetzner_vibe root@46.225.50.87 "bash /tmp/deploy_vi
 
 `vibe-eth-scalp` is **retired** (deploy stops + disables it). v6 owns the full Spot book.
 
+### Micro / grace knobs (v6_config)
+
+| Knob | Default | Role |
+|------|---------|------|
+| `MIN_BUY_SCORE_GRACE` | 2.90 | Score floor under need_recharge / grace |
+| `GRACE_MAX_BUYS` / `_GREEN` | 1 / 2 | Caps under `grace_1clip` / `grace_2clip` |
+| `SL_MICRO` / `TIME_*_MICRO` | 1.2% / 2.5h | Tighter exits on micro books |
+| `EARLY_EXIT_H` / `_PNL` | 0.75h / −0.4% | Cut losers early in grace |
+| `POLL_HUNT_GRACE_SEC` | 300 | Faster hunt with powder + no legs |
+| Earn LD* redeem | auto | Preflight unlock when equity<$50 or usable thin |
+
+Rollback Ops overlay: delete or trim `/root/.vibe-trading/v6_knobs_overlay.json` knobs for those keys.
+
 ## smart-fast-v6 layout
 
 | File | Role |

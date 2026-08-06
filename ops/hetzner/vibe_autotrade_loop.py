@@ -52,10 +52,18 @@ MAX_MAJOR_BUYS_DAY = cfg.MAX_MAJOR_BUYS_DAY
 COOLDOWN_HOURS = cfg.COOLDOWN_HOURS
 POLL_OPEN_SEC = cfg.POLL_OPEN_SEC
 POLL_HUNT_SEC = cfg.POLL_HUNT_SEC
+POLL_HUNT_GRACE_SEC = cfg.POLL_HUNT_GRACE_SEC
 POLL_IDLE_SEC = cfg.POLL_IDLE_SEC
 MIN_USDT = cfg.MIN_USDT
 MIN_BUY_SCORE = cfg.MIN_BUY_SCORE
 MIN_BUY_SCORE_BEAR = cfg.MIN_BUY_SCORE_BEAR
+MIN_BUY_SCORE_GRACE = cfg.MIN_BUY_SCORE_GRACE
+TIME_MIN_PNL = cfg.TIME_MIN_PNL
+SL_MICRO = cfg.SL_MICRO
+TIME_STOP_HOURS_MICRO = cfg.TIME_STOP_HOURS_MICRO
+TIME_MIN_PNL_MICRO = cfg.TIME_MIN_PNL_MICRO
+EARLY_EXIT_H = cfg.EARLY_EXIT_H
+EARLY_EXIT_PNL = cfg.EARLY_EXIT_PNL
 DUST_USD = cfg.DUST_USD
 DAY_LOSS_HALT_PCT = cfg.DAY_LOSS_HALT_PCT
 STRATEGY_TAG = cfg.STRATEGY_TAG
@@ -68,6 +76,7 @@ SCALP_USDT_RESERVE = cfg.SCALP_USDT_RESERVE
 SCALP_STATE_PATH = HOME / "eth_scalp_state.json"
 ORDER_LOCK_PATH = HOME / "order.lock"
 INTENTS_PATH = HOME / "ops_intents.jsonl"
+_EARN_UNLOCK_STATE = HOME / "earn_unlock_state.json"
 
 # Per-tick guards
 _tick_sold: set[str] = set()
@@ -78,7 +87,9 @@ def refresh_knobs_from_overlay() -> dict:
     """Pull Ops overlay into cfg + local aliases used by this module."""
     global ORDER_USD, TP, SL, TRAIL_ACT, TRAIL_GB, TIME_STOP_HOURS
     global MAX_BUYS_PER_DAY, MAX_OPEN_LEGS, MIN_BUY_SCORE, MIN_BUY_SCORE_BEAR
-    global DAY_LOSS_HALT_PCT, COOLDOWN_HOURS, MIN_USDT
+    global MIN_BUY_SCORE_GRACE, DAY_LOSS_HALT_PCT, COOLDOWN_HOURS, MIN_USDT
+    global TIME_MIN_PNL, SL_MICRO, TIME_STOP_HOURS_MICRO, TIME_MIN_PNL_MICRO
+    global EARLY_EXIT_H, EARLY_EXIT_PNL, POLL_HUNT_GRACE_SEC, DUST_USD
     applied = cfg.apply_overlay(str(HOME))
     ORDER_USD = cfg.ORDER_USD
     TP = cfg.TP
@@ -86,13 +97,22 @@ def refresh_knobs_from_overlay() -> dict:
     TRAIL_ACT = cfg.TRAIL_ACT
     TRAIL_GB = cfg.TRAIL_GB
     TIME_STOP_HOURS = cfg.TIME_STOP_HOURS
+    TIME_MIN_PNL = cfg.TIME_MIN_PNL
     MAX_BUYS_PER_DAY = cfg.MAX_BUYS_PER_DAY
     MAX_OPEN_LEGS = cfg.MAX_OPEN_LEGS
     MIN_BUY_SCORE = cfg.MIN_BUY_SCORE
     MIN_BUY_SCORE_BEAR = cfg.MIN_BUY_SCORE_BEAR
+    MIN_BUY_SCORE_GRACE = cfg.MIN_BUY_SCORE_GRACE
     DAY_LOSS_HALT_PCT = cfg.DAY_LOSS_HALT_PCT
     COOLDOWN_HOURS = cfg.COOLDOWN_HOURS
     MIN_USDT = cfg.MIN_USDT
+    SL_MICRO = cfg.SL_MICRO
+    TIME_STOP_HOURS_MICRO = cfg.TIME_STOP_HOURS_MICRO
+    TIME_MIN_PNL_MICRO = cfg.TIME_MIN_PNL_MICRO
+    EARLY_EXIT_H = cfg.EARLY_EXIT_H
+    EARLY_EXIT_PNL = cfg.EARLY_EXIT_PNL
+    POLL_HUNT_GRACE_SEC = cfg.POLL_HUNT_GRACE_SEC
+    DUST_USD = cfg.DUST_USD
     if applied:
         log(f"KNOBS_OVERLAY {applied}")
     return applied
@@ -664,6 +684,99 @@ def redeem_flexible(asset: str, amount: float | None = None, redeem_all: bool = 
         return False
 
 
+def unlock_micro_earn(state: dict) -> dict[str, Any]:
+    """Redeem Flexible Earn (LD*) and convert idle Spot alts to USDT under recharge.
+
+    LDBTC counts in equity but not usable Spot USDT — free it when micro.
+    """
+    eq = book_equity()
+    usable = usable_usdt_for_v6()
+    try:
+        import binance_wallets as bw
+
+        earn_usd = float(bw.earn_locked_usd())
+    except Exception:
+        earn_usd = 0.0
+    recharge = float(cfg.MIN_EQUITY_RECHARGE)
+    need = (
+        (eq > 0 and eq < recharge)
+        or (usable < 2.0 * float(ORDER_USD) and earn_usd >= 5.0)
+    )
+    if not need:
+        return {"ok": True, "skipped": True, "earn_usd": earn_usd, "usable": usable}
+
+    try:
+        st = {}
+        if _EARN_UNLOCK_STATE.exists():
+            st = json.loads(_EARN_UNLOCK_STATE.read_text(encoding="utf-8"))
+        last = float(st.get("ts") or 0)
+        if time.time() - last < 300:
+            return {"ok": True, "cooldown": True, "earn_usd": earn_usd}
+    except Exception:
+        pass
+
+    redeemed: list[str] = []
+    try:
+        import binance_wallets as bw
+
+        redeemed = bw.redeem_all_flexible_earn(force=False)
+    except Exception as exc:  # noqa: BLE001
+        log(f"EARN_UNLOCK_API_FAIL {exc}")
+        # Fallback to local redeem helpers
+        for row in flexible_positions():
+            asset = str(row.get("asset") or "").upper()
+            if asset and redeem_flexible(asset, redeem_all=True):
+                redeemed.append(asset)
+
+    # Sell idle non-strategy holdings unlocked from Earn (not young tracked legs)
+    hard = {
+        a
+        for a, meta in (state.get("positions") or {}).items()
+        if float((meta or {}).get("usd") or 0) >= MIN_EXIT_USD
+    }
+    sold: list[str] = []
+    for asset in list(dict.fromkeys(redeemed + ["BTC", "ETH", "BNB", "LINK", "SOL"])):
+        if asset in STABLES or asset in hard:
+            continue
+        holdings = spot_holdings()
+        h = holdings.get(asset)
+        if not h or float(h.get("usd") or 0) < MIN_EXIT_USD:
+            continue
+        meta = (state.get("positions") or {}).get(asset) or {}
+        if meta and (
+            _leg_is_young(meta) or _leg_in_trail(meta, float(h.get("px") or 0))
+        ):
+            continue
+        before = usable_usdt_for_v6()
+        market_sell_raw(
+            asset,
+            need_usd=max(ORDER_USD * 2, float(h["usd"]) * 0.99),
+            state=state,
+            reason="FUND_EARN",
+        )
+        after = usable_usdt_for_v6()
+        if after > before + 0.5:
+            sold.append(asset)
+
+    try:
+        _EARN_UNLOCK_STATE.write_text(
+            json.dumps({"ts": time.time(), "redeemed": redeemed, "sold": sold}) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    usable2 = usable_usdt_for_v6()
+    log(f"EARN_UNLOCK redeemed={redeemed} sold={sold} usable={usable:.2f}->{usable2:.2f}")
+    return {
+        "ok": True,
+        "redeemed": redeemed,
+        "sold": sold,
+        "usable_before": usable,
+        "usable_after": usable2,
+        "earn_usd": earn_usd,
+    }
+
+
 def dust_to_bnb(only_assets: list[str] | None = None, max_usd: float = 1.0) -> bool:
     from src.trading.connectors.binance import sdk as bn
 
@@ -1056,6 +1169,17 @@ def analyze_symbol(symbol: str, btc_chg24: float, regime: str) -> dict[str, Any]
         if rs > 1.0 and r1 < 68 and e12 and e26 and e12 >= e26:
             score += 1.4
             reasons.append("rs_leader")
+        # Trend continuation when RSI is warm (no dip) — fills score gap vs 3.5
+        if (
+            e12
+            and e26
+            and e12 > e26
+            and 45 <= r1 <= 68
+            and rs > -0.5
+            and "bull_dip" not in reasons
+        ):
+            score += 1.1
+            reasons.append("trend_cont")
         if chg > 0 and r15 < 62:
             score += 0.5
     elif regime == "bear":
@@ -1140,21 +1264,68 @@ def sync_positions(state: dict) -> dict[str, dict[str, float]]:
     positions = dict(state.get("positions") or {})
     for asset in list(positions.keys()):
         prev = positions.get(asset) or {}
-        if asset not in holdings or holdings[asset]["usd"] < 0.4:
-            # Leg vanished without execute_sell — audit it
+        h = holdings.get(asset)
+        # Broker still has crumbs → re-attach instead of false vanish
+        if h and float(h.get("qty") or 0) > 0 and float(h.get("usd") or 0) >= (
+            DUST_USD / 3.0
+        ):
+            if float(h.get("usd") or 0) < 0.4:
+                entry = float(prev.get("entry") or h["px"] or 0) or float(h["px"])
+                peak = max(float(prev.get("peak") or 0), float(h["px"]), entry)
+                positions[asset] = {
+                    **prev,
+                    "entry": entry,
+                    "peak": peak,
+                    "qty": h["qty"],
+                    "usd": round(float(h["usd"]), 4),
+                    "vanish_misses": 0,
+                    "sync_reattach": True,
+                }
+                log(f"SYNC_REATTACH {asset} usd={h['usd']:.4f}")
+                try:
+                    import trade_events as te
+
+                    te.record_trade_event(
+                        bot="v6",
+                        side="sync",
+                        symbol=asset,
+                        price=float(h["px"] or 0),
+                        usd=float(h["usd"] or 0),
+                        mode=_orch_mode(),
+                        regime=str(state.get("regime") or ""),
+                        pnl_pct=None,
+                        result="reattach",
+                        equity=book_equity(),
+                        reason="SYNC_REATTACH",
+                        kind="SYNC",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log(f"TRADE_EVENT_FAIL sync_reattach {asset} {exc}")
+                continue
+            # healthy holding — updated in second loop
+            prev.pop("vanish_misses", None)
+            positions[asset] = prev
+            continue
+
+        # Missing or true dust
+        if h is None or float(h.get("usd") or 0) < 0.4:
+            misses = int(prev.get("vanish_misses") or 0) + 1
+            last_usd = float(prev.get("usd") or 0)
+            # Wait ≥2 ticks; never vanish a sizable leg on a single miss
+            if misses < 2 or (last_usd >= DUST_USD and misses < 3):
+                prev["vanish_misses"] = misses
+                positions[asset] = prev
+                continue
             try:
                 import market_orchestrator as orch
                 import trade_events as te
 
                 entry = float(prev.get("entry") or 0)
-                last_usd = float(prev.get("usd") or 0)
                 px = entry if entry > 0 else 0.0
                 pnl_pct = None
-                result = "unknown"
-                if asset in holdings and holdings[asset]["usd"] < 0.4 and entry > 0:
-                    px = float(holdings[asset].get("px") or entry)
+                if h and entry > 0:
+                    px = float(h.get("px") or entry)
                     pnl_pct = (px / entry) - 1.0
-                    result = None  # derive from pnl
                 te.record_trade_event(
                     bot="v6",
                     side="sell",
@@ -1164,7 +1335,7 @@ def sync_positions(state: dict) -> dict[str, dict[str, float]]:
                     mode=orch.current_mode(),
                     regime=str(state.get("regime") or ""),
                     pnl_pct=pnl_pct,
-                    result=result,
+                    result="vanish",
                     equity=book_equity(),
                     reason="SYNC_VANISH",
                     kind="SYNC",
@@ -1187,6 +1358,7 @@ def sync_positions(state: dict) -> dict[str, dict[str, float]]:
             "opened_ts": prev.get("opened_ts") or utc_ts(),
             "score": prev.get("score"),
             "regime": prev.get("regime"),
+            "vanish_misses": 0,
         }
     state["positions"] = positions
     save_state(state)
@@ -1299,12 +1471,23 @@ def set_cooldown(state: dict, asset: str) -> None:
 MIN_HOLD_MINUTES = 25.0  # agent: no exit except SL before this
 
 
+def _micro_exits_active(mode_reason: str = "") -> bool:
+    try:
+        eq = book_equity()
+    except Exception:
+        eq = 0.0
+    if eq > 0 and eq < float(cfg.MIN_EQUITY_RECHARGE):
+        return True
+    return "grace_" in (mode_reason or "")
+
+
 def classify_exit(
     asset: str,
     h: dict[str, float],
     meta: dict,
     *,
     rotate_down: bool = False,
+    mode_reason: str = "",
 ) -> dict[str, Any] | None:
     if h["usd"] < MIN_EXIT_USD * 0.99:
         return None
@@ -1316,18 +1499,27 @@ def classify_exit(
     age_h = (utc_now() - opened).total_seconds() / 3600.0 if opened else 0.0
     age_m = age_h * 60.0
 
+    micro = _micro_exits_active(mode_reason)
+    sl_lim = float(SL_MICRO if micro else SL)
+    time_h = float(TIME_STOP_HOURS_MICRO if micro else TIME_STOP_HOURS)
+    time_min = float(TIME_MIN_PNL_MICRO if micro else TIME_MIN_PNL)
+    early_h = float(EARLY_EXIT_H if micro else 0.0)
+    early_pnl = float(EARLY_EXIT_PNL if micro else -1.0)
+
     reason = None
-    kind = None  # sl|tp|trail|time|rotate
-    if pnl <= -SL:
+    kind = None  # sl|tp|trail|time|rotate|early
+    if pnl <= -sl_lim:
         reason, kind = f"SL {pnl*100:.1f}%", "sl"
     elif age_m < MIN_HOLD_MINUTES:
         # hold gate: only hard SL may exit early
         return None
+    elif early_h > 0 and age_h <= early_h and pnl <= early_pnl:
+        reason, kind = f"EARLY {pnl*100:.1f}%", "early"
     elif pnl >= TP:
         reason, kind = f"TP {pnl*100:.1f}%", "tp"
     elif peak >= entry * (1 + TRAIL_ACT) and dd_from_peak <= -TRAIL_GB:
         reason, kind = f"TRAIL {pnl*100:.1f}%", "trail"
-    elif age_h >= TIME_STOP_HOURS and pnl < 0.015:
+    elif age_h >= time_h and pnl < time_min:
         reason, kind = f"TIME {age_h:.1f}h", "time"
     elif rotate_down:
         reason, kind = f"ROTATE {pnl*100:.1f}%", "rotate"
@@ -1352,6 +1544,7 @@ def pick_exit(
     *,
     rotate_down: bool = False,
     emergency_only: bool = False,
+    mode_reason: str = "",
 ) -> dict[str, Any] | None:
     positions = state.get("positions") or {}
     cands: list[dict[str, Any]] = []
@@ -1365,13 +1558,17 @@ def pick_exit(
             meta["usd"] = h["usd"]
             meta["qty"] = h["qty"]
             positions[asset] = meta
-        exit_c = classify_exit(asset, h, meta, rotate_down=rotate_down)
+        exit_c = classify_exit(
+            asset, h, meta, rotate_down=rotate_down, mode_reason=mode_reason
+        )
         if not exit_c:
             continue
-        if emergency_only and exit_c["kind"] not in ("tp", "sl"):
+        if emergency_only and exit_c["kind"] not in ("tp", "sl", "early"):
             continue
         # priority rank
-        rank = {"sl": 4, "tp": 3, "trail": 2, "time": 1, "rotate": 0}.get(exit_c["kind"], 0)
+        rank = {"sl": 4, "early": 4, "tp": 3, "trail": 2, "time": 1, "rotate": 0}.get(
+            exit_c["kind"], 0
+        )
         # for rotate, prefer worst pnl
         score = rank * 10 - (exit_c["pnl"] if exit_c["kind"] == "rotate" else 0)
         exit_c["score"] = score
@@ -1529,6 +1726,14 @@ def try_exits(state: dict) -> bool:
         log("HALTED")
         return False
 
+    mode_reason = ""
+    try:
+        import market_orchestrator as orch
+
+        mode_reason = str((orch.load_mode() or {}).get("reason") or "")
+    except Exception:
+        pass
+
     holdings = sync_positions(state)
     positions = state.get("positions") or {}
     tracked_legs = sum(
@@ -1540,13 +1745,25 @@ def try_exits(state: dict) -> bool:
     rotate = tracked_legs > MAX_OPEN_LEGS and daily < 3
 
     if daily < 3:
-        exit_c = pick_exit(state, holdings, rotate_down=rotate, emergency_only=False)
+        exit_c = pick_exit(
+            state,
+            holdings,
+            rotate_down=rotate,
+            emergency_only=False,
+            mode_reason=mode_reason,
+        )
         if not exit_c:
             return False
         return execute_sell(state, exit_c, emergency=False)
 
     # day full: emergency TP/SL only
-    exit_c = pick_exit(state, holdings, rotate_down=False, emergency_only=True)
+    exit_c = pick_exit(
+        state,
+        holdings,
+        rotate_down=False,
+        emergency_only=True,
+        mode_reason=mode_reason,
+    )
     if not exit_c:
         return False
     return execute_sell(state, exit_c, emergency=True)
@@ -1639,11 +1856,23 @@ def select_buy(
     state: dict,
     regime: str,
     holdings: dict[str, dict[str, float]],
+    *,
+    mode_reason: str = "",
+    equity: float = 0.0,
 ) -> dict[str, Any] | None:
     ensure_buy_counters(state)
     if int(state.get("buys_today") or 0) >= MAX_BUYS_PER_DAY:
         return None
     min_score = MIN_BUY_SCORE_BEAR if regime == "bear" else MIN_BUY_SCORE
+    grace = "grace_" in (mode_reason or "") or (
+        equity > 0 and equity < float(cfg.MIN_EQUITY_RECHARGE)
+    )
+    if grace:
+        min_score = (
+            float(MIN_BUY_SCORE_GRACE) + 0.4
+            if regime == "bear"
+            else float(MIN_BUY_SCORE_GRACE)
+        )
     open_legs = sum(1 for a, h in holdings.items() if h["usd"] >= MIN_EXIT_USD * 0.9)
     if open_legs >= MAX_OPEN_LEGS:
         log(f"SKIP_BUY max open legs={open_legs}")
@@ -1726,32 +1955,36 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
         log(f"SKIP_DAY_EDGE wr={wr:.2f} rated={rated}")
         return False
 
-    # Soft / grace: at most one clip while those reasons are active
-    one_clip = (
+    # Soft / grace: unified cap (1 default, 2 on grace_2clip with fee headroom)
+    soft_or_grace = (
         "grace_1clip" in mode_reason
+        or "grace_2clip" in mode_reason
         or "fee_budget_soft" in mode_reason
         or "allow_one_clip" in mode_reason
+        or (eq_feats > 0 and eq_feats < float(cfg.MIN_EQUITY_RECHARGE))
     )
-    if eq_feats > 0 and eq_feats < float(cfg.MIN_EQUITY_RECHARGE):
-        one_clip = True
-        if int(state.get("buys_today") or 0) >= int(cfg.GRACE_MAX_BUYS):
+    if soft_or_grace:
+        grace_cap = int(cfg.GRACE_MAX_BUYS)
+        if "grace_2clip" in mode_reason:
+            grace_cap = int(cfg.GRACE_MAX_BUYS_GREEN)
+        buys_today = int(state.get("buys_today") or 0)
+        # 2nd clip needs projected fee headroom
+        if grace_cap >= 2 and buys_today >= 1:
+            denom = max(float(feats.get("day_open") or 0), eq_feats, 1.0)
+            proj = float(feats.get("notional_frac") or 0) + (float(ORDER_USD) / denom)
+            if proj >= fee_lim - float(cfg.FEE_GRACE2_HEADROOM):
+                grace_cap = 1
+                log(f"GRACE2_FEE_BLOCK proj_frac={proj:.3f} lim={fee_lim:.3f}")
+        if buys_today >= grace_cap:
             te.record_skip(
                 "SKIP_GRACE_FULL",
                 bot="v6",
-                detail=f"equity={eq_feats:.2f} buys={state.get('buys_today')}",
+                detail=f"equity={eq_feats:.2f} buys={buys_today} cap={grace_cap}",
                 mode=mode,
             )
-            log(f"SKIP_GRACE_FULL buys={state.get('buys_today')}")
+            log(f"SKIP_GRACE_FULL buys={buys_today} cap={grace_cap}")
+            _trace_skip("grace_full", buys=buys_today, cap=grace_cap)
             return False
-    if one_clip and int(state.get("buys_today") or 0) >= 1:
-        te.record_skip(
-            "SKIP_ONE_CLIP",
-            bot="v6",
-            detail=mode_reason[:120],
-            mode=mode,
-        )
-        log("SKIP_ONE_CLIP already used today under soft/grace mode")
-        return False
 
     mandate = load_mandate("binance")
     if mandate is None:
@@ -1787,7 +2020,14 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
                 score=round(float(top["score"]), 2),
                 reasons=",".join(top["reasons"]) or "-",
             )
-    pick = select_buy(ranked, state, regime_info["regime"], holdings)
+    pick = select_buy(
+        ranked,
+        state,
+        regime_info["regime"],
+        holdings,
+        mode_reason=mode_reason,
+        equity=eq_feats,
+    )
     if not pick:
         te.record_skip(
             "SKIP_SCORE",
@@ -1981,6 +2221,19 @@ def tick() -> None:
             tr.end(made=0, note="halted")
             log("HALTED skip tick")
             return
+
+        phase = "earn_unlock"
+        tr.phase(phase)
+        try:
+            unlocked = unlock_micro_earn(state)
+            if unlocked and not unlocked.get("skipped") and not unlocked.get("cooldown"):
+                tr.decide(
+                    "EARN_UNLOCK",
+                    reason=f"redeemed={unlocked.get('redeemed')} sold={unlocked.get('sold')}",
+                )
+                state = load_state()
+        except Exception as exc:  # noqa: BLE001
+            log(f"EARN_UNLOCK_FAIL {exc}")
 
         phase = "ops_intents"
         tr.phase(phase)
@@ -2177,8 +2430,31 @@ def sleep_seconds() -> int:
     mandate = load_mandate("binance")
     cap = mandate.hard_caps.max_trades_per_day if mandate else 3
     daily = read_daily_count("binance")
-    if has_exitable_leg(load_state()):
+    state = load_state()
+    if has_exitable_leg(state):
         return POLL_OPEN_SEC
+    # Grace / micro hunt faster when dry powder available and no open legs
+    try:
+        import market_orchestrator as orch
+
+        doc = orch.load_mode() or {}
+        reason = str(doc.get("reason") or "")
+        mode = str(doc.get("mode") or "")
+        feats = doc.get("features") or {}
+        eq = float(feats.get("equity") or 0)
+        usable = float(feats.get("usable_usdt") or usable_usdt_for_v6())
+        grace = "grace_" in reason or (
+            eq > 0 and eq < float(cfg.MIN_EQUITY_RECHARGE)
+        )
+        if (
+            orch.allows_v6_buys(mode)
+            and grace
+            and usable >= float(ORDER_USD)
+            and daily < cap
+        ):
+            return int(POLL_HUNT_GRACE_SEC)
+    except Exception:
+        pass
     if daily < cap:
         return POLL_HUNT_SEC
     return POLL_IDLE_SEC

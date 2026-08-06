@@ -120,10 +120,16 @@ def binance_snapshot(vibe: Path) -> dict:
         if leg:
             legs.append(leg)
     feats = mode.get("features") or {}
+    earn = float(feats.get("earn_locked_usd") or 0)
+    usable = round(float(feats.get("usable_usdt") or 0), 2)
     return {
         "venue": "Binance",
         "equity": round(eq, 2),
-        "usable": round(float(feats.get("usable_usdt") or 0), 2),
+        "usable": usable,
+        "earn_locked": round(earn, 2),
+        "equity_usable_gap": round(
+            float(feats.get("equity_usable_gap") or max(0.0, eq - usable)), 2
+        ),
         "mode": mode.get("mode") or "?",
         "reason": str(mode.get("reason") or "")[:240],
         "since_ts": mode.get("since_ts"),
@@ -144,6 +150,8 @@ def binance_snapshot(vibe: Path) -> dict:
         "strategy": st.get("strategy") or "smart-fast-v6",
         "features": {
             "usable_usdt": feats.get("usable_usdt"),
+            "earn_locked_usd": feats.get("earn_locked_usd"),
+            "equity_usable_gap": feats.get("equity_usable_gap"),
             "btc_regime": feats.get("btc_regime"),
             "btc_chg24": feats.get("btc_chg24"),
             "btc_chg1h": feats.get("btc_chg1h"),
@@ -249,7 +257,17 @@ def recent_trades(home: Path, n: int = 30) -> list[dict]:
 
 
 def recent_skips(home: Path, n: int = 30) -> list[dict]:
-    return read_jsonl_tail(home / "skip_events.jsonl", n)
+    """Skip events for digest; drop retired scalper noise by default."""
+    rows = read_jsonl_tail(home / "skip_events.jsonl", max(n * 4, 80))
+    out: list[dict] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        bot = str(r.get("bot") or "").lower()
+        if bot == "scalper":
+            continue
+        out.append(r)
+    return out[-n:]
 
 
 def _today_cdmx() -> str:
@@ -443,12 +461,25 @@ def live_situations(vibe: Path) -> dict[str, Any]:
 
     eq = float(bn.get("equity") or 0)
     usdt = float(bn.get("usable") or 0)
+    earn = float(bn.get("earn_locked") or feats.get("earn_locked_usd") or 0)
     if "need_recharge" in reason:
+        grace = (
+            "grace 2 clips"
+            if "grace_2clip" in reason
+            else ("grace 1 clip" if "grace" in reason else "")
+        )
         add(
             "warn",
             "need_recharge",
             f"Equity ${eq:.2f} < $50 · recarga · usable ${usdt:.2f}"
-            + (" · grace 1 clip" if "grace" in reason else ""),
+            + (f" · {grace}" if grace else "")
+            + (f" · Earn~${earn:.0f}" if earn >= 1 else ""),
+        )
+    if earn >= 5 and usdt + 1 < eq:
+        add(
+            "warn",
+            "earn_trap",
+            f"Flexible Earn ~${earn:.2f} infla equity; usable Spot ${usdt:.2f}",
         )
     if "fee_budget_soft" in reason:
         add("info", "fee_budget_soft", reason[:160])
@@ -604,7 +635,7 @@ def digest_text(vibe: Path, alpaca: Path) -> str:
         "",
         "## Binance",
         f"- Strategy: {bn.get('strategy')} · mode: {bn.get('mode')} · halt: {bn.get('halt')}",
-        f"- Equity: ${bn.get('equity')} · usable: ${bn.get('usable')} · day: {bn.get('day_pnl_pct')}%",
+        f"- Equity: ${bn.get('equity')} · usable: ${bn.get('usable')} · Earn: ${bn.get('earn_locked') or 0} · day: {bn.get('day_pnl_pct')}%",
         f"- Regime: {bn.get('regime')} · reason: {bn.get('reason')}",
         f"- Buys/trades today: {bn.get('buys_today')}/{bn.get('trades_done')} · last: {bn.get('last_symbol') or '—'}",
         "- Legs:",
@@ -733,6 +764,7 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
         lines.append("- Alpaca: archivo HALT presente")
     day_pnl = float(bn.get("day_pnl_pct") or 0)
     eq_bn = float(bn.get("equity") or 0)
+    reason = str(bn.get("reason") or "")
     day_thr = -5.0 if 0 < eq_bn < 100 else -3.0
     if day_pnl <= day_thr:
         lines.append(
@@ -740,18 +772,29 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
             f"dinámico: −5% si equity<$100 else −3%). No tiene sentido proponer buys nuevos hoy."
         )
     if eq_bn > 0 and eq_bn < 50:
+        grace_note = (
+            "grace_2clip (day verde)"
+            if "grace_2clip" in reason
+            else "grace_1clip defensive si usable≥clip"
+        )
         lines.append(
             f"- Binance equity ${eq_bn:.2f} < $50 → modo need_recharge "
-            f"(máx 1 clip defensive si usable≥clip; si no, recap)."
+            f"({grace_note}; score≥MIN_BUY_SCORE_GRACE)."
         )
+        earn = float(bn.get("earn_locked") or feats.get("earn_locked_usd") or 0)
+        gap = float(bn.get("equity_usable_gap") or 0)
+        if earn >= 1 or gap >= 5:
+            lines.append(
+                f"- Gap equity↔usable: ${gap:.2f} · Flexible Earn ~${earn:.2f} "
+                f"(loop redimirá LD* en micro)."
+            )
     if str(bn.get("mode") or "") == "standby":
         mode_doc = read_json(vibe / "strategy_mode.json") or {}
         lines.append(
             f"- Binance mode=standby · reason: {bn.get('reason') or '—'} · "
             f"usable=${bn.get('usable')} · flips_today={mode_doc.get('flips_today')}"
         )
-    reason = str(bn.get("reason") or "")
-    if "fee_budget_soft" in reason or "grace_1clip" in reason or "need_recharge" in reason:
+    if "fee_budget_soft" in reason or "grace_" in reason or "need_recharge" in reason:
         lines.append(f"- Binance orch soft/recharge: {reason}")
     if float(bn.get("usable") or 0) < 1:
         lines.append("- Binance usable USDT ≈ 0 → sin dry powder para nuevas entradas (unlock idle USDT si hay alts)")
@@ -762,7 +805,8 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
         "",
         "## Binance live",
         f"- strategy={bn.get('strategy')} mode={bn.get('mode')} regime={bn.get('regime')} halt={bn.get('halt')}",
-        f"- equity=${bn.get('equity')} usable=${bn.get('usable')} day_pnl={bn.get('day_pnl_pct')}% (${bn.get('day_pnl')})",
+        f"- equity=${bn.get('equity')} usable=${bn.get('usable')} earn=${bn.get('earn_locked') or 0} "
+        f"gap=${bn.get('equity_usable_gap') or 0} day_pnl={bn.get('day_pnl_pct')}% (${bn.get('day_pnl')})",
         f"- week_pnl={bn.get('week_pnl_pct')}% · buys_today={bn.get('buys_today')} trades_done={bn.get('trades_done')} last={bn.get('last_symbol')}",
         f"- orch_reason: {bn.get('reason')}",
         f"- features: btc_regime={feats.get('btc_regime')} btc_1h={feats.get('btc_chg1h')} "
