@@ -3,7 +3,7 @@
     "id": "smart-fast-v6",
     "title": "Binance Spot · smart-fast-v6",
     "prompt": "PROMPT_V6 v2",
-    "summary": "Un solo agente Spot live: intradía RS/momentum, clip pequeño, maximiza usable USDT. ETH scalper retirado. Cuentas <$50: need_recharge + 1 clip grace. Fee soft y day-loss dinámico (−5% si equity<$100).",
+    "summary": "Un solo agente Spot live: intradía RS/momentum, clip pequeño, maximiza usable USDT. ETH scalper eliminado. Cuentas <$50: need_recharge + grace. Fee soft y day-loss dinámico.",
     "style": "Intradía · un leg · HOLD > overtrade · sin martingale ni average-down",
     "universe": ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "LINK"],
     "knobs": {
@@ -87,5 +87,24 @@
       "4 exits first",
       "5 journal + chart"
     ]
+  },
+  "alpaca_scalp15": {
+    "id": "scalp15-momentum",
+    "title": "Alpaca paper · scalp15 (15m)",
+    "prompt": "15m candle-close momentum",
+    "summary": "Cuenta paper aparte. Entradas solo en cierre de vela 15m: breakout+volumen+EMA+RSI, filtro BTC 1h. Clip $50, 2 legs, day halt −1.5%.",
+    "style": "Scalp intradía 15m · multi-asset · sin pelear con canonical_v2",
+    "universe": ["BTC", "ETH", "SOL", "DOGE", "LINK", "AVAX", "LTC", "UNI", "AAVE", "XRP"],
+    "knobs": {
+      "clip_usd": 50,
+      "tp_pct": 1.0,
+      "sl_pct": 0.55,
+      "trail": "+0.6% / −0.3%",
+      "time_stop": "45m si PnL < +0.4%",
+      "max_legs": 2,
+      "max_buys_day": 8,
+      "day_loss_halt_pct": -1.5,
+      "score_min": 3.2
+    }
   }
 }

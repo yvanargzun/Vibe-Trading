@@ -307,23 +307,38 @@ def set_halt(
     if not confirm:
         return {"ok": False, "error": "confirm_required", "hint": "Pass confirm=true after user OK"}
     venue = (venue or "all").lower().strip()
-    if venue not in ("binance", "alpaca", "all"):
+    if venue not in ("binance", "alpaca", "alpaca_scalp15", "all"):
         return {"ok": False, "error": "bad_venue", "venue": venue}
     touched: list[str] = []
     if venue in ("binance", "all"):
         global_h = vibe / "live" / "HALT"
         broker_h = vibe / "live" / "binance" / "HALT"
+        # also root HALT used by vibe-autotrade loop
+        root_h = vibe / "HALT"
         if halt:
-            for p in (global_h, broker_h):
+            for p in (global_h, broker_h, root_h):
                 _write_json(p, _halt_payload(reason))
                 touched.append(str(p))
         else:
-            for p in (global_h, broker_h):
+            for p in (global_h, broker_h, root_h):
                 if p.exists():
                     p.unlink(missing_ok=True)
                     touched.append(f"cleared:{p}")
     if venue in ("alpaca", "all"):
         p = alpaca / "HALT"
+        if halt:
+            _write_json(p, _halt_payload(reason))
+            touched.append(str(p))
+        else:
+            if p.exists():
+                p.unlink(missing_ok=True)
+                touched.append(f"cleared:{p}")
+    if venue in ("alpaca_scalp15", "all"):
+        import os
+
+        home = Path(os.environ.get("ALPACA_SCALP15_HOME", "/data/alpaca_scalp15"))
+        p = home / "HALT"
+        p.parent.mkdir(parents=True, exist_ok=True)
         if halt:
             _write_json(p, _halt_payload(reason))
             touched.append(str(p))
@@ -449,7 +464,7 @@ def set_knobs(
     if not confirm:
         return {"ok": False, "error": "confirm_required"}
     venue = (venue or "").lower().strip()
-    if venue not in ("binance", "alpaca"):
+    if venue not in ("binance", "alpaca", "alpaca_scalp15"):
         return {"ok": False, "error": "bad_venue"}
     clean = normalize_knobs(knobs)
     # Drop empty / invalid
@@ -472,7 +487,14 @@ def set_knobs(
             "allowed": sorted(KNOB_KEYS),
             "hint": "Use ORDER_USD/SL/... or sleeve aliases (clip_usd_burst, score_min_burst, …)",
         }
-    home = vibe if venue == "binance" else alpaca
+    if venue == "binance":
+        home = vibe
+    elif venue == "alpaca_scalp15":
+        import os
+
+        home = Path(os.environ.get("ALPACA_SCALP15_HOME", "/data/alpaca_scalp15"))
+    else:
+        home = alpaca
     path = home / "v6_knobs_overlay.json"
     prev = _read_json(path)
     merged = {**(prev.get("knobs") or {}), **final}
@@ -551,15 +573,19 @@ def enqueue_intent(
 
 
 def control_status(vibe: Path, alpaca: Path) -> dict[str, Any]:
+    import os
+
     bn_mode = _read_json(vibe / "strategy_mode.json")
     al_ctl = _read_json(alpaca / "ops_control.json")
     prefs = _read_json(vibe / "telegram_notify_prefs.json")
+    s15 = Path(os.environ.get("ALPACA_SCALP15_HOME", "/data/alpaca_scalp15"))
     return {
         "binance": {
             "mode": bn_mode.get("mode"),
             "locked": bool(bn_mode.get("locked")),
             "halt": (vibe / "live" / "HALT").exists()
-            or (vibe / "live" / "binance" / "HALT").exists(),
+            or (vibe / "live" / "binance" / "HALT").exists()
+            or (vibe / "HALT").exists(),
             "knobs_overlay": _read_json(vibe / "v6_knobs_overlay.json").get("knobs") or {},
             "queued_intents": _queued_count(vibe / "ops_intents.jsonl"),
         },
@@ -569,6 +595,12 @@ def control_status(vibe: Path, alpaca: Path) -> dict[str, Any]:
             "halt": (alpaca / "HALT").exists(),
             "knobs_overlay": _read_json(alpaca / "v6_knobs_overlay.json").get("knobs") or {},
             "queued_intents": _queued_count(alpaca / "ops_intents.jsonl"),
+        },
+        "alpaca_scalp15": {
+            "halt": (s15 / "HALT").exists(),
+            "knobs_overlay": _read_json(s15 / "v6_knobs_overlay.json").get("knobs") or {},
+            "queued_intents": _queued_count(s15 / "ops_intents.jsonl"),
+            "home": str(s15),
         },
         "notify_filter": prefs.get("mode") or "all",
     }

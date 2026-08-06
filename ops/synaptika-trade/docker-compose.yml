@@ -86,6 +86,7 @@ services:
       - OPS_HOME=/data
       - VIBE_HOME=/data/vibe
       - ALPACA_HOME=/data/alpaca
+      - ALPACA_SCALP15_HOME=/data/alpaca_scalp15
       - OPS_PASSWORD=${OPS_PASSWORD:-changeme}
       - OPS_SECRET=${OPS_SECRET:-synaptika-ops-secret}
       - OPS_API_KEY=${OPS_API_KEY:-}
@@ -109,6 +110,7 @@ services:
       - open_webui:/data/webui:ro
       - /root/.vibe-trading:/data/vibe
       - /root/.alpaca-paper:/data/alpaca
+      - /root/.alpaca-scalp15:/data/alpaca_scalp15
       - /root/synaptika-trade/ops_audit.jsonl:/data/ops_audit.jsonl
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -626,9 +626,52 @@ def activity(vibe: Path, alpaca: Path, limit: int = 40) -> dict:
     }
 
 
+def alpaca_scalp15_snapshot(home: Path) -> dict:
+    """Separate Alpaca paper account — 15m momentum scalper."""
+    st = read_json(home / "state.json")
+    g = st.get("goals") or {}
+    eq = float(st.get("equity") or 0)
+    day_open = float(g.get("day_open_equity") or eq or 0)
+    week_open = float(g.get("week_open_equity") or 0)
+    day_pnl, day_pnl_pct = _day_pnl(eq, day_open)
+    week_pnl, week_pnl_pct = _day_pnl(eq, week_open) if week_open else (0.0, 0.0)
+    legs = []
+    for a, m in (st.get("positions") or {}).items():
+        leg = _leg_from_meta(a, m or {}, sleeve="scalp15")
+        if leg:
+            legs.append(leg)
+    return {
+        "venue": "Alpaca · scalp15",
+        "equity": round(eq, 2) if eq else 0,
+        "mode": "scalp15",
+        "title": "15m momentum",
+        "regime": st.get("regime") or "?",
+        "day_open": round(day_open, 2) if day_open else None,
+        "day_pnl": day_pnl,
+        "day_pnl_pct": day_pnl_pct,
+        "week_pnl": week_pnl,
+        "week_pnl_pct": week_pnl_pct,
+        "daily_target_usd": g.get("daily_target_usd"),
+        "buys_today": st.get("buys_today"),
+        "trades_done": st.get("trades_today"),
+        "last_symbol": st.get("last_symbol"),
+        "legs": legs,
+        "halt": (home / "HALT").exists(),
+        "strategy": st.get("strategy") or "scalp15-momentum-v1",
+        "present": (home / "state.json").exists() or (home / "alpaca_scalp15.py").exists(),
+    }
+
+
+def _scalp15_home() -> Path:
+    import os
+
+    return Path(os.environ.get("ALPACA_SCALP15_HOME", "/data/alpaca_scalp15"))
+
+
 def digest_text(vibe: Path, alpaca: Path) -> str:
     bn = binance_snapshot(vibe)
     ap = alpaca_snapshot(alpaca)
+    s15 = alpaca_scalp15_snapshot(_scalp15_home())
     briefs = strategy_briefs()
     lines = [
         f"# Synaptika Trade digest · {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
@@ -666,6 +709,20 @@ def digest_text(vibe: Path, alpaca: Path) -> str:
     brief_ap = (briefs.get("alpaca") or {}).get("summary") or ""
     if brief_ap:
         lines += ["", f"Brief: {brief_ap}"]
+
+    if s15.get("present"):
+        lines += [
+            "",
+            "## Alpaca scalp15 (15m)",
+            f"- Strategy: {s15.get('strategy')} · halt: {s15.get('halt')} · regime: {s15.get('regime')}",
+            f"- Equity: ${s15.get('equity')} · day: {s15.get('day_pnl_pct')}% · buys: {s15.get('buys_today')}",
+            "- Legs:",
+        ]
+        if s15.get("legs"):
+            for L in s15["legs"]:
+                lines.append(f"  - {L['asset']}: ${L['usd']}")
+        else:
+            lines.append("  - (none)")
 
     act = activity(vibe, alpaca, limit=8)
     wl = win_loss_table(vibe, alpaca)
@@ -953,15 +1010,18 @@ def full_status(vibe: Path, alpaca: Path) -> dict[str, Any]:
     briefs = strategy_briefs()
     bn = binance_snapshot(vibe)
     ap = alpaca_snapshot(alpaca)
+    s15 = alpaca_scalp15_snapshot(_scalp15_home())
     return {
         "ts": time.time(),
         "binance": bn,
         "alpaca": ap,
+        "alpaca_scalp15": s15,
         "strategy": {
             "briefs": briefs,
             "live": {
                 "binance_mode": bn.get("mode"),
                 "alpaca_mode": ap.get("mode"),
+                "alpaca_scalp15": s15.get("mode"),
             },
         },
         "activity": activity(vibe, alpaca, limit=40),
@@ -973,5 +1033,6 @@ def full_status(vibe: Path, alpaca: Path) -> dict[str, Any]:
         "equity": {
             "binance": equity_series(vibe),
             "alpaca": equity_series(alpaca),
+            "alpaca_scalp15": equity_series(_scalp15_home()),
         },
     }
