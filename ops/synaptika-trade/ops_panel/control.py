@@ -8,6 +8,7 @@ on the next tick (mode/knobs/HALT) or execute queued intents (buy/sell/close).
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -35,6 +36,7 @@ KNOB_KEYS = frozenset(
         "TRAIL_ACT",
         "TRAIL_GB",
         "TIME_STOP_HOURS",
+        "TIME_MIN_PNL",
         "MAX_BUYS_PER_DAY",
         "MAX_OPEN_LEGS",
         "MIN_BUY_SCORE",
@@ -44,8 +46,211 @@ KNOB_KEYS = frozenset(
         "MAX_TRADES_PER_DAY",
         "COOLDOWN_HOURS",
         "MAX_EXPOSURE_PCT",
+        "SLEEVE_CORE",
+        "SLEEVE_BURST",
     }
 )
+SLEEVE_FIELDS = frozenset(
+    {
+        "order_pct",
+        "order_min",
+        "order_max",
+        "max_exposure_pct",
+        "tp",
+        "sl",
+        "trail_act",
+        "trail_gb",
+        "time_stop_h",
+        "time_min_pnl",
+        "time_cut_pnl",
+        "cooldown_h",
+        "min_score",
+        "min_score_bear",
+        "max_buys_day",
+        "max_trades_day",
+        "max_legs",
+        "max_major_buys",
+        "smart_time",
+        "rotate",
+        "liquid_only",
+        "early_exit_h",
+        "early_exit_pnl",
+        "extend_threshold",
+        "post_loss_cooldown_h",
+        "max_consecutive_losses",
+        "loss_streak_block_h",
+    }
+)
+
+
+def _pct(v: Any) -> float:
+    """Coerce knobs that may be fraction (0.012) or percent points (1.2)."""
+    if isinstance(v, str):
+        s = v.strip().replace("+", "").replace("%", "").strip()
+        x = float(s)
+        # Strings like "1.2%" / "+1.5%" → always percent points
+        if "%" in str(v):
+            return x / 100.0
+    else:
+        x = float(v)
+    # Bare numbers: |x|>0.5 ⇒ percent points (1.2 → 1.2%)
+    if abs(x) > 0.5:
+        return x / 100.0
+    return x
+
+
+def _pct_from_match(num: str) -> float:
+    """Regex capture of a percent value (always percent points)."""
+    return float(num) / 100.0
+
+
+def _hours(v: Any) -> float:
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().lower().replace(" ", "")
+    if s.endswith("/asset"):
+        s = s[: -len("/asset")]
+    if s.endswith("h"):
+        s = s[:-1]
+    return float(s)
+
+
+def _merge_sleeve(dst: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(dst)
+    for k, v in patch.items():
+        key = str(k).lower().strip()
+        if key not in SLEEVE_FIELDS:
+            continue
+        if key in {
+            "max_buys_day",
+            "max_trades_day",
+            "max_legs",
+            "max_major_buys",
+            "max_consecutive_losses",
+        }:
+            out[key] = int(v)
+        elif key in {"smart_time", "rotate", "liquid_only"}:
+            out[key] = bool(v)
+        else:
+            out[key] = float(v)
+    return out
+
+
+def normalize_knobs(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Map copiloto aliases + canonical keys into overlay shape."""
+    src = dict(raw or {})
+    # lowercase alias lookup without destroying casing of nested
+    aliases = {str(k): v for k, v in src.items()}
+    lower = {str(k).lower(): v for k, v in src.items()}
+    out: dict[str, Any] = {}
+    core: dict[str, Any] = {}
+    burst: dict[str, Any] = {}
+
+    for key in KNOB_KEYS:
+        if key in aliases and key not in ("SLEEVE_CORE", "SLEEVE_BURST"):
+            try:
+                out[key] = float(aliases[key])
+            except (TypeError, ValueError):
+                pass
+
+    if isinstance(aliases.get("SLEEVE_CORE"), dict):
+        core = _merge_sleeve(core, aliases["SLEEVE_CORE"])
+    if isinstance(aliases.get("SLEEVE_BURST"), dict):
+        burst = _merge_sleeve(burst, aliases["SLEEVE_BURST"])
+
+    # --- Proposal aliases (copiloto natural names) ---
+    if "clip_usd_burst" in lower or "order_usd_burst" in lower:
+        clip = float(lower.get("clip_usd_burst", lower.get("order_usd_burst")))
+        burst = _merge_sleeve(burst, {"order_min": clip, "order_max": clip, "order_pct": 0.0001})
+    if "burst_max_notional_pct" in lower:
+        burst = _merge_sleeve(
+            burst, {"max_exposure_pct": _pct(lower["burst_max_notional_pct"])}
+        )
+    if "sl_pct_burst" in lower:
+        burst = _merge_sleeve(burst, {"sl": _pct(lower["sl_pct_burst"])})
+    if "trail_burst" in lower:
+        tb = lower["trail_burst"]
+        if isinstance(tb, dict):
+            act = tb.get("tp", tb.get("trail_act", tb.get("act")))
+            gb = tb.get("sl", tb.get("trail_gb", tb.get("gb")))
+            patch = {}
+            if act is not None:
+                patch["trail_act"] = _pct(act if isinstance(act, str) else f"{act}%")
+            if gb is not None:
+                patch["trail_gb"] = abs(_pct(gb if isinstance(gb, str) else f"{gb}%"))
+            burst = _merge_sleeve(burst, patch)
+    if "score_min_burst" in lower:
+        burst = _merge_sleeve(burst, {"min_score": float(lower["score_min_burst"])})
+    if "score_min_core" in lower:
+        core = _merge_sleeve(core, {"min_score": float(lower["score_min_core"])})
+        out.setdefault("MIN_BUY_SCORE", float(lower["score_min_core"]))
+    if "cooldown_burst" in lower:
+        burst = _merge_sleeve(burst, {"cooldown_h": _hours(lower["cooldown_burst"])})
+    if "cooldown_burst_post_loss" in lower:
+        burst = _merge_sleeve(
+            burst, {"post_loss_cooldown_h": _hours(lower["cooldown_burst_post_loss"])}
+        )
+    if "burst_max_consecutive_losses" in lower:
+        burst = _merge_sleeve(
+            burst, {"max_consecutive_losses": int(lower["burst_max_consecutive_losses"])}
+        )
+    if "time_stop_core" in lower:
+        # e.g. "3h si PnL < +2.0%" — extract leading hours + optional pnl
+        s = str(lower["time_stop_core"])
+        hm = re.search(r"([0-9.]+)\s*h", s, re.I)
+        pm = re.search(r"([+-]?[0-9.]+)\s*%", s)
+        patch: dict[str, Any] = {}
+        if hm:
+            patch["time_stop_h"] = float(hm.group(1))
+        if pm:
+            patch["time_min_pnl"] = _pct_from_match(pm.group(1))
+            out.setdefault("TIME_MIN_PNL", patch["time_min_pnl"])
+        if patch:
+            core = _merge_sleeve(core, patch)
+            if "time_stop_h" in patch:
+                out.setdefault("TIME_STOP_HOURS", patch["time_stop_h"])
+    if "time_stop_early_core" in lower:
+        s = str(lower["time_stop_early_core"])
+        pm = re.search(r"([+-]?[0-9.]+)\s*%", s)
+        hm = re.search(r"([0-9.]+)\s*h", s, re.I)
+        core = _merge_sleeve(
+            core,
+            {
+                "early_exit_pnl": _pct_from_match(pm.group(1)) if pm else -0.003,
+                "early_exit_h": float(hm.group(1)) if hm else 1.0,
+            },
+        )
+    if "time_stop_extension_threshold" in lower:
+        raw_ext = lower["time_stop_extension_threshold"]
+        if isinstance(raw_ext, str) and "%" in raw_ext:
+            core = _merge_sleeve(core, {"extend_threshold": _pct(raw_ext)})
+        else:
+            core = _merge_sleeve(core, {"extend_threshold": _pct(raw_ext)})
+    if "time_stop" in lower and "TIME_STOP_HOURS" not in out:
+        s = str(lower["time_stop"])
+        hm = re.search(r"([0-9.]+)\s*h", s, re.I)
+        pm = re.search(r"([+-]?[0-9.]+)\s*%", s)
+        if hm:
+            out["TIME_STOP_HOURS"] = float(hm.group(1))
+        if pm:
+            out["TIME_MIN_PNL"] = _pct_from_match(pm.group(1))
+    if "score_min" in lower and "MIN_BUY_SCORE" not in out:
+        out["MIN_BUY_SCORE"] = float(lower["score_min"])
+    if "trail" in lower and "TRAIL_ACT" not in out:
+        tr = lower["trail"]
+        if isinstance(tr, dict):
+            act = tr.get("tp", tr.get("trail_act"))
+            gb = tr.get("sl", tr.get("trail_gb"))
+            if act is not None:
+                out["TRAIL_ACT"] = _pct(act if isinstance(act, str) else f"{act}%")
+            if gb is not None:
+                out["TRAIL_GB"] = abs(_pct(gb if isinstance(gb, str) else f"{gb}%"))
+
+    if core:
+        out["SLEEVE_CORE"] = core
+    if burst:
+        out["SLEEVE_BURST"] = burst
+    return out
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -238,21 +443,38 @@ def set_knobs(
     venue = (venue or "").lower().strip()
     if venue not in ("binance", "alpaca"):
         return {"ok": False, "error": "bad_venue"}
-    clean: dict[str, Any] = {}
-    for k, v in (knobs or {}).items():
-        key = str(k).upper()
-        if key not in KNOB_KEYS:
+    clean = normalize_knobs(knobs)
+    # Drop empty / invalid
+    final: dict[str, Any] = {}
+    for k, v in clean.items():
+        if k in ("SLEEVE_CORE", "SLEEVE_BURST"):
+            if isinstance(v, dict) and v:
+                final[k] = v
+            continue
+        if k not in KNOB_KEYS:
             continue
         try:
-            clean[key] = float(v) if not isinstance(v, bool) else v
+            final[k] = float(v) if not isinstance(v, bool) else v
         except (TypeError, ValueError):
             continue
-    if not clean:
-        return {"ok": False, "error": "no_valid_knobs", "allowed": sorted(KNOB_KEYS)}
+    if not final:
+        return {
+            "ok": False,
+            "error": "no_valid_knobs",
+            "allowed": sorted(KNOB_KEYS),
+            "hint": "Use ORDER_USD/SL/... or sleeve aliases (clip_usd_burst, score_min_burst, …)",
+        }
     home = vibe if venue == "binance" else alpaca
     path = home / "v6_knobs_overlay.json"
     prev = _read_json(path)
-    merged = {**(prev.get("knobs") or {}), **clean}
+    merged = {**(prev.get("knobs") or {}), **final}
+    # Deep-merge sleeve dicts
+    for sk in ("SLEEVE_CORE", "SLEEVE_BURST"):
+        if sk in final:
+            merged[sk] = {
+                **dict((prev.get("knobs") or {}).get(sk) or {}),
+                **final[sk],
+            }
     doc = {
         "knobs": merged,
         "updated_ts": time.time(),
