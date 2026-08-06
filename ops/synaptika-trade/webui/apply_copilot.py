@@ -41,8 +41,8 @@ SUGGESTIONS = [
         "content": "Analiza wins/losses de Binance y Alpaca (totales y hoy) y qué patrones ves en los últimos cierres.",
     },
     {
-        "title": ["Propuestas operativas", "read-only"],
-        "content": "Con el brief actual, dame 3 propuestas operativas concretas para las próximas horas (sin ejecutar órdenes) y sus riesgos.",
+        "title": ["Cambiar estrategia", "con confirmación"],
+        "content": "Revisa get_control_status y propone un cambio de modo o knobs. Pídeme confirmación explícita antes de llamar set_strategy_mode / set_strategy_knobs.",
     },
     {
         "title": ["Por qué standby", "Binance"],
@@ -95,16 +95,18 @@ def upsert_model(
     now = int(time.time())
     params = {
         "system": prompt,
-        # Digest arrives via global filter. Native tool-calling on free
-        # OpenRouter models often emits tool_calls without finishing the
-        # UI loop, which looks like a hung chat.
+        # Digest arrives via global filter. Native tool-calling is required
+        # for OpenAPI Tool Server (read + write Ops tools).
         "stream_response": True,
         "max_tokens": 4096,
         "temperature": 0.4,
+        "function_calling": "native",
     }
     meta = {
-        "description": "Copiloto Synaptika Trade — solo bots del VPS (Binance/Alpaca).",
+        "description": "Copiloto Synaptika Trade — bots VPS + control (modo/HALT/knobs/órdenes) con confirmación.",
         "filterIds": [FILTER_ID],
+        # Open WebUI OpenAPI tool server id "0" (Synaptika Ops).
+        "toolIds": ["server:0"],
         "capabilities": {
             "vision": False,
             "file_upload": False,
@@ -112,6 +114,7 @@ def upsert_model(
             "image_generation": False,
             "code_interpreter": False,
             "citations": True,
+            "usage": True,
         },
         "suggestion_prompts": [s["content"] for s in SUGGESTIONS],
     }
@@ -252,8 +255,8 @@ def main() -> int:
                 "id": "0",
                 "name": "Synaptika Ops",
                 "description": (
-                    "API read-only de los bots Binance/Alpaca en el VPS. "
-                    "Usa digest/status/strategy/activity/equity antes de afirmar datos."
+                    "API Ops: lectura + control (halt/mode/knobs/intents) para "
+                    "Binance y Alpaca paper. Write tools requieren confirm=true."
                 ),
             },
         }
@@ -275,6 +278,7 @@ def main() -> int:
                 "stream_response": True,
                 "max_tokens": 4096,
                 "temperature": 0.4,
+                "function_calling": "native",
             },
         )
         upsert_filter(cur, uid)

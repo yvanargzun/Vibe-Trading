@@ -104,8 +104,16 @@ docker compose --env-file secrets.env exec -T \
 docker compose --env-file secrets.env exec -T \
   -e CHAT_HISTORY_DIR=/data/chat_history \
   open-webui python3 /srv/webui/export_chat_history.py || true
+# Restart so TOOL_SERVERS cache picks up OpenAPI write tools + model toolIds
 docker compose --env-file secrets.env restart open-webui || true
 sleep 5
+# Smoke: OpenAPI must expose write ops for copiloto control
+if curl -fsS -H "X-Ops-Key: ${OPS_API_KEY}" http://127.0.0.1:8787/ops/api/openapi.json \
+  | grep -q set_strategy_mode; then
+  echo "OK: OpenAPI write tools (set_strategy_mode) present"
+else
+  echo "WARN: OpenAPI missing set_strategy_mode — check ops container mounts" >&2
+fi
 
 docker compose ps
 echo "==== health ===="

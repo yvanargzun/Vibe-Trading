@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only snapshots from Binance/Alpaca state dirs for Ops + Open WebUI tools."""
+"""Snapshots from Binance/Alpaca state dirs for Ops + Open WebUI tools."""
 
 from __future__ import annotations
 
@@ -722,7 +722,8 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
     lines = [
         f"# Synaptika Copiloto BRIEF · {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
         "Usa ESTE bloque como fuente completa. NO pidas al usuario get_bot_digest ni exports.",
-        "Puedes proponer hipótesis / escenarios / checklist operativo read-only (sin ejecutar órdenes).",
+        "Puedes proponer y, tras confirmación explícita del usuario, ejecutar "
+        "set_strategy_mode / set_bot_halt / set_strategy_knobs / enqueue_trade_intent.",
         "",
         "## Restricciones operativas ahora",
     ]
