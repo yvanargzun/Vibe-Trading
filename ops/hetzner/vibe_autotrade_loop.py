@@ -67,10 +67,118 @@ STABLES = set(cfg.STABLES)
 SCALP_USDT_RESERVE = cfg.SCALP_USDT_RESERVE
 SCALP_STATE_PATH = HOME / "eth_scalp_state.json"
 ORDER_LOCK_PATH = HOME / "order.lock"
+INTENTS_PATH = HOME / "ops_intents.jsonl"
 
 # Per-tick guards
 _tick_sold: set[str] = set()
 _tick_fund_sold: set[str] = set()
+
+
+def refresh_knobs_from_overlay() -> dict:
+    """Pull Ops overlay into cfg + local aliases used by this module."""
+    global ORDER_USD, TP, SL, TRAIL_ACT, TRAIL_GB, TIME_STOP_HOURS
+    global MAX_BUYS_PER_DAY, MAX_OPEN_LEGS, MIN_BUY_SCORE, MIN_BUY_SCORE_BEAR
+    global DAY_LOSS_HALT_PCT, COOLDOWN_HOURS, MIN_USDT
+    applied = cfg.apply_overlay(str(HOME))
+    ORDER_USD = cfg.ORDER_USD
+    TP = cfg.TP
+    SL = cfg.SL
+    TRAIL_ACT = cfg.TRAIL_ACT
+    TRAIL_GB = cfg.TRAIL_GB
+    TIME_STOP_HOURS = cfg.TIME_STOP_HOURS
+    MAX_BUYS_PER_DAY = cfg.MAX_BUYS_PER_DAY
+    MAX_OPEN_LEGS = cfg.MAX_OPEN_LEGS
+    MIN_BUY_SCORE = cfg.MIN_BUY_SCORE
+    MIN_BUY_SCORE_BEAR = cfg.MIN_BUY_SCORE_BEAR
+    DAY_LOSS_HALT_PCT = cfg.DAY_LOSS_HALT_PCT
+    COOLDOWN_HOURS = cfg.COOLDOWN_HOURS
+    MIN_USDT = cfg.MIN_USDT
+    if applied:
+        log(f"KNOBS_OVERLAY {applied}")
+    return applied
+
+
+def _rewrite_intents(rows: list[dict]) -> None:
+    INTENTS_PATH.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + ("\n" if rows else ""),
+        encoding="utf-8",
+    )
+
+
+def process_ops_intents(state: dict) -> int:
+    """Execute queued Ops Copiloto intents (buy/sell/close). Returns actions made."""
+    if not INTENTS_PATH.exists():
+        return 0
+    try:
+        lines = INTENTS_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    rows: list[dict] = []
+    for line in lines:
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    made = 0
+    changed = False
+    for row in rows:
+        if row.get("status") != "queued":
+            continue
+        action = str(row.get("action") or "")
+        sym = str(row.get("symbol") or "")
+        try:
+            if action == "buy":
+                usd = float(row.get("usd") or ORDER_USD)
+                result = place_gate_order(sym, "buy", notional=usd)
+                ok = order_succeeded(result)
+                row["status"] = "done" if ok else "error"
+                row["result"] = str(result.get("status") or result.get("error") or result)[:200]
+                log(f"OPS_INTENT buy {sym} ${usd:.2f} -> {row['status']}")
+                if ok:
+                    made += 1
+                    base = sym.split("/")[0]
+                    note_buy(state, base)
+            elif action in ("sell", "close"):
+                base = sym.split("/")[0]
+                holdings = sync_positions(state)
+                h = holdings.get(base)
+                if not h or h["usd"] < 0.5:
+                    row["status"] = "error"
+                    row["result"] = "no_position"
+                else:
+                    result = place_gate_order(sym, "sell", quantity=h["qty"])
+                    ok = order_succeeded(result)
+                    row["status"] = "done" if ok else "error"
+                    row["result"] = str(result.get("status") or result.get("error") or result)[:200]
+                    log(f"OPS_INTENT sell {sym} -> {row['status']}")
+                    if ok:
+                        made += 1
+            elif action == "close_all":
+                holdings = sync_positions(state)
+                any_ok = False
+                for base, h in list(holdings.items()):
+                    if h["usd"] < 0.5:
+                        continue
+                    pair = f"{base}/USDT"
+                    result = place_gate_order(pair, "sell", quantity=h["qty"])
+                    if order_succeeded(result):
+                        any_ok = True
+                        made += 1
+                row["status"] = "done" if any_ok else "error"
+                row["result"] = "close_all"
+                log(f"OPS_INTENT close_all -> {row['status']}")
+            else:
+                row["status"] = "error"
+                row["result"] = "bad_action"
+        except Exception as exc:  # noqa: BLE001
+            row["status"] = "error"
+            row["result"] = str(exc)[:200]
+            log(f"OPS_INTENT_FAIL {action} {exc}")
+        changed = True
+    if changed:
+        _rewrite_intents(rows)
+        save_state(state)
+    return made
 
 
 def utc_now() -> datetime:
@@ -1853,6 +1961,7 @@ def tick() -> None:
     global _tick_sold, _tick_fund_sold
     _tick_sold = set()
     _tick_fund_sold = set()
+    refresh_knobs_from_overlay()
 
     from src.live.daily_count import read_daily_count
     from src.live.halt import halt_flag_set
@@ -1872,6 +1981,13 @@ def tick() -> None:
             tr.end(made=0, note="halted")
             log("HALTED skip tick")
             return
+
+        phase = "ops_intents"
+        tr.phase(phase)
+        intent_made = process_ops_intents(state)
+        if intent_made:
+            tr.decide("OPS_INTENT", reason=f"made={intent_made}")
+            state = load_state()
 
         phase = "orch"
         tr.phase(phase)

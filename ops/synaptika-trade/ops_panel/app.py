@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synaptika Trade Ops panel — SSR dashboard + read-only tools API."""
+"""Synaptika Trade Ops panel — SSR dashboard + read/write tools API."""
 
 from __future__ import annotations
 
@@ -24,6 +24,8 @@ from flask import (
 )
 
 import chat_history as chathist
+import control as opsctl
+import control_api
 import data as botdata
 
 app = Flask(__name__, template_folder="templates", static_folder=None)
@@ -423,6 +425,7 @@ def api_strategy():
                     "halt": ap.get("halt"),
                 },
             },
+            "control": opsctl.control_status(VIBE, ALPACA),
         }
     )
 
@@ -430,115 +433,71 @@ def api_strategy():
 @app.get("/ops/api/openapi.json")
 def api_openapi():
     server = request.url_root.rstrip("/")
+    paths = {
+        "/ops/api/status": {
+            "get": {
+                "operationId": "get_bot_status",
+                "summary": "Snapshot completo Binance+Alpaca",
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+        "/ops/api/digest": {
+            "get": {
+                "operationId": "get_bot_digest",
+                "summary": "Digest ES de los bots",
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+        "/ops/api/winloss": {
+            "get": {
+                "operationId": "get_win_loss",
+                "summary": "Wins/Losses por bot",
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+        "/ops/api/copilot": {
+            "get": {
+                "operationId": "get_copilot_brief",
+                "summary": "Brief rico para el chat IA",
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+        "/ops/api/strategy": {
+            "get": {
+                "operationId": "get_strategy_briefs",
+                "summary": "Briefs + modo live + control flags",
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+        "/ops/api/activity": {
+            "get": {
+                "operationId": "get_bot_activity",
+                "summary": "Ciclos / fills / skips",
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+        "/ops/api/equity": {
+            "get": {
+                "operationId": "get_equity_history",
+                "summary": "Serie de equity",
+                "responses": {"200": {"description": "OK"}},
+            }
+        },
+    }
+    paths.update(control_api.openapi_write_paths())
     spec = {
         "openapi": "3.0.3",
         "info": {
             "title": "Synaptika Trade Ops Tools",
-            "version": "1.0.0",
+            "version": "2.0.0",
             "description": (
-                "Read-only live state for Synaptika VPS bots (Binance smart-fast-v6 "
-                "and Alpaca canonical_v2). Auth: Bearer OPS_API_KEY or X-Ops-Key. "
-                "Call these tools before stating any live numbers."
+                "Live state + control for Binance smart-fast-v6 and Alpaca paper. "
+                "Auth: Bearer OPS_API_KEY or X-Ops-Key. "
+                "Write tools require confirm=true after user OK."
             ),
         },
         "servers": [{"url": server}],
-        "paths": {
-            "/ops/api/status": {
-                "get": {
-                    "operationId": "get_bot_status",
-                    "summary": "Snapshot completo Binance+Alpaca",
-                    "description": (
-                        "Estado live: equity, PnL, posiciones, modo, features y flags "
-                        "HALT/day-loss de ambos bots del VPS."
-                    ),
-                    "responses": {"200": {"description": "OK"}},
-                }
-            },
-            "/ops/api/digest": {
-                "get": {
-                    "operationId": "get_bot_digest",
-                    "summary": "Digest ES de los bots",
-                    "description": (
-                        "Resumen corto en español del estado operativo. "
-                        "Úsalo primero ante preguntas generales de estado."
-                    ),
-                    "responses": {"200": {"description": "OK"}},
-                }
-            },
-            "/ops/api/winloss": {
-                "get": {
-                    "operationId": "get_win_loss",
-                    "summary": "Wins/Losses por bot",
-                    "description": (
-                        "Conteo de wins, losses y flat para Binance y Alpaca "
-                        "(totales y del día CDMX) más cierres recientes."
-                    ),
-                    "responses": {"200": {"description": "OK"}},
-                }
-            },
-            "/ops/api/copilot": {
-                "get": {
-                    "operationId": "get_copilot_brief",
-                    "summary": "Brief rico para el chat IA",
-                    "description": (
-                        "Estado + wins/losses + cierres + skips + ciclos + restricciones. "
-                        "Pensado para propuestas sin pedir datos al usuario."
-                    ),
-                    "responses": {"200": {"description": "OK"}},
-                }
-            },
-            "/ops/api/strategy": {
-                "get": {
-                    "operationId": "get_strategy_briefs",
-                    "summary": "Briefs de estrategia + modo live",
-                    "description": (
-                        "Documentación de estrategia y mode/features actuales "
-                        "por venue (Binance vs Alpaca)."
-                    ),
-                    "responses": {"200": {"description": "OK"}},
-                }
-            },
-            "/ops/api/activity": {
-                "get": {
-                    "operationId": "get_bot_activity",
-                    "summary": "Actividad reciente ciclos/fills/skips",
-                    "description": (
-                        "Últimos ciclos, trades y skips. Usa para preguntas de "
-                        "actividad reciente o por qué no operó."
-                    ),
-                    "parameters": [
-                        {
-                            "name": "limit",
-                            "in": "query",
-                            "schema": {"type": "integer", "default": 40},
-                        }
-                    ],
-                    "responses": {"200": {"description": "OK"}},
-                }
-            },
-            "/ops/api/equity": {
-                "get": {
-                    "operationId": "get_equity_history",
-                    "summary": "Serie de equity",
-                    "description": (
-                        "Historial de equity para gráficos/tendencia. "
-                        "Param venue: binance | alpaca | all."
-                    ),
-                    "parameters": [
-                        {
-                            "name": "venue",
-                            "in": "query",
-                            "schema": {
-                                "type": "string",
-                                "enum": ["binance", "alpaca", "all"],
-                                "default": "all",
-                            },
-                        }
-                    ],
-                    "responses": {"200": {"description": "OK"}},
-                }
-            },
-        },
+        "paths": paths,
         "components": {
             "securitySchemes": {
                 "OpsKey": {"type": "apiKey", "in": "header", "name": "X-Ops-Key"},
@@ -554,6 +513,16 @@ def api_openapi():
 @login_required
 def api_status_legacy():
     return redirect("/ops/api/status")
+
+
+# Register write control routes (halt/mode/knobs/intent for Binance + Alpaca)
+control_api.register(
+    app,
+    vibe=VIBE,
+    alpaca=ALPACA,
+    audit=_audit,
+    api_auth_required=api_auth_required,
+)
 
 
 if __name__ == "__main__":

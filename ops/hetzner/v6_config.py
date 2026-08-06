@@ -92,3 +92,47 @@ def knobs_summary() -> str:
         f"REECHARGE<{MIN_EQUITY_RECHARGE} FEE={FEE_NOTIONAL_FRAC}/{FEE_NOTIONAL_FRAC_SMALL} "
         f"prompt={PROMPT_VERSION} reserve={SCALP_USDT_RESERVE}"
     )
+
+
+def apply_overlay(path: str | None = None) -> dict:
+    """Apply Ops Copiloto runtime knobs from v6_knobs_overlay.json into this module."""
+    import json
+    from pathlib import Path
+
+    global ORDER_USD, TP, SL, TRAIL_ACT, TRAIL_GB, TIME_STOP_HOURS
+    global MAX_BUYS_PER_DAY, MAX_OPEN_LEGS, MIN_BUY_SCORE, MIN_BUY_SCORE_BEAR
+    global DAY_LOSS_HALT_PCT, COOLDOWN_HOURS
+
+    p = Path(path or os.environ.get("VIBE_TRADING_HOME", "/root/.vibe-trading")) / "v6_knobs_overlay.json"
+    if not p.exists():
+        return {}
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    knobs = dict(doc.get("knobs") or {})
+    mapping = {
+        "ORDER_USD": "ORDER_USD",
+        "TP": "TP",
+        "SL": "SL",
+        "TRAIL_ACT": "TRAIL_ACT",
+        "TRAIL_GB": "TRAIL_GB",
+        "TIME_STOP_HOURS": "TIME_STOP_HOURS",
+        "MAX_BUYS_PER_DAY": "MAX_BUYS_PER_DAY",
+        "MAX_OPEN_LEGS": "MAX_OPEN_LEGS",
+        "MIN_BUY_SCORE": "MIN_BUY_SCORE",
+        "MIN_BUY_SCORE_BEAR": "MIN_BUY_SCORE_BEAR",
+        "DAY_LOSS_HALT_PCT": "DAY_LOSS_HALT_PCT",
+        "COOLDOWN_HOURS": "COOLDOWN_HOURS",
+    }
+    g = globals()
+    applied = {}
+    for src, dst in mapping.items():
+        if src in knobs:
+            try:
+                g[dst] = type(g[dst])(knobs[src])
+                applied[dst] = g[dst]
+            except (TypeError, ValueError):
+                continue
+    return applied
+

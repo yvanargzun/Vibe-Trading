@@ -99,14 +99,16 @@ services:
       - ./ops_panel/app.py:/app/app.py:ro
       - ./ops_panel/data.py:/app/data.py:ro
       - ./ops_panel/chat_history.py:/app/chat_history.py:ro
+      - ./ops_panel/control.py:/app/control.py:ro
+      - ./ops_panel/control_api.py:/app/control_api.py:ro
       - ./ops_panel/strategy_briefs.json:/app/strategy_briefs.json:ro
       - ./ops_panel/templates:/app/templates:ro
       - ./ops_panel/static:/app/static:ro
       - ./brand:/brand:ro
       - ./chat_history:/data/chat_history
       - open_webui:/data/webui:ro
-      - /root/.vibe-trading:/data/vibe:ro
-      - /root/.alpaca-paper:/data/alpaca:ro
+      - /root/.vibe-trading:/data/vibe
+      - /root/.alpaca-paper:/data/alpaca
       - /root/synaptika-trade/ops_audit.jsonl:/data/ops_audit.jsonl
     extra_hosts:
       - "host.docker.internal:host-gateway"

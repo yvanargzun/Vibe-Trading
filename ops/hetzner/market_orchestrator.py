@@ -396,6 +396,21 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         "wins_today": wins,
         "losses_today": losses_d,
     }
+
+    # Ops Copiloto sticky lock — do not auto-flip mode
+    if bool(doc.get("locked")):
+        cur = str(doc.get("mode") or "defensive")
+        doc["features"] = features
+        doc["updated_ts"] = now
+        doc["reason"] = f"locked:{doc.get('reason') or cur}"
+        _save_mode(doc)
+        print(
+            f"ORCH mode={cur} want=locked held={ (now-float(doc.get('since_ts') or now))/60:.1f}m "
+            f"flips={doc.get('flips_today')} reason={doc['reason'][:80]}",
+            flush=True,
+        )
+        return doc
+
     target, reason = propose_mode(features)
     cur = str(doc.get("mode") or "defensive")
     since = float(doc.get("since_ts") or now)
