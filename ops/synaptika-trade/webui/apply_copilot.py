@@ -12,10 +12,11 @@ from pathlib import Path
 DB = os.environ.get("WEBUI_DB", "/app/backend/data/webui.db")
 PROMPT_PATH = Path(os.environ.get("SYSTEM_PROMPT_FILE", "/srv/webui/SYSTEM_PROMPT.md"))
 FREE_PATH = Path(os.environ.get("FREE_MODELS_FILE", "/srv/webui/free_models.json"))
-DEFAULT_BASE = os.environ.get("DEFAULT_MODELS", "inclusionai/ling-3.0-flash:free")
+DEFAULT_BASE = os.environ.get("DEFAULT_MODELS", "synaptika-auto")
 COPILOT_ID = "synaptika-copiloto"
 OLLAMA_COPILOT_ID = "synaptika-ollama"
-OLLAMA_DEFAULT_BASE = os.environ.get("OLLAMA_DEFAULT_MODEL", "deepseek-v4-flash")
+OLLAMA_DEFAULT_BASE = os.environ.get("OLLAMA_DEFAULT_MODEL", "gemma4:31b")
+PROXY_MODEL = os.environ.get("LLM_PROXY_MODEL", "synaptika-auto")
 OPS_URL = os.environ.get("OPS_TOOL_URL", "http://ops:8787")
 OPS_OPENAPI_PATH = os.environ.get("OPS_TOOL_OPENAPI_PATH", "/ops/api/openapi.json")
 OPS_API_KEY = os.environ.get("OPS_API_KEY", "").strip()
@@ -41,8 +42,8 @@ SUGGESTIONS = [
         "content": "Analiza wins/losses de Binance y Alpaca (totales y hoy) y qué patrones ves en los últimos cierres.",
     },
     {
-        "title": ["Propuestas operativas", "read-only"],
-        "content": "Con el brief actual, dame 3 propuestas operativas concretas para las próximas horas (sin ejecutar órdenes) y sus riesgos.",
+        "title": ["Cambiar estrategia", "con confirmación"],
+        "content": "Revisa get_control_status y propone un cambio de modo o knobs. Pídeme confirmación explícita antes de llamar set_strategy_mode / set_strategy_knobs.",
     },
     {
         "title": ["Por qué standby", "Binance"],
@@ -95,16 +96,19 @@ def upsert_model(
     now = int(time.time())
     params = {
         "system": prompt,
-        # Digest arrives via global filter. Native tool-calling on free
-        # OpenRouter models often emits tool_calls without finishing the
-        # UI loop, which looks like a hung chat.
+        # Digest arrives via global filter. Keep native tools for write Ops,
+        # but stream so the UI does not look frozen while the proxy fails over.
+        # llm-proxy wraps the final completion as SSE when stream=true.
         "stream_response": True,
-        "max_tokens": 4096,
+        "max_tokens": 2048,
         "temperature": 0.4,
+        "function_calling": "native",
     }
     meta = {
-        "description": "Copiloto Synaptika Trade — solo bots del VPS (Binance/Alpaca).",
+        "description": "Copiloto Synaptika Trade — bots VPS + control (modo/HALT/knobs/órdenes) con confirmación.",
         "filterIds": [FILTER_ID],
+        # Open WebUI OpenAPI tool server id "0" (Synaptika Ops).
+        "toolIds": ["server:0"],
         "capabilities": {
             "vision": False,
             "file_upload": False,
@@ -112,6 +116,7 @@ def upsert_model(
             "image_generation": False,
             "code_interpreter": False,
             "citations": True,
+            "usage": True,
         },
         "suggestion_prompts": [s["content"] for s in SUGGESTIONS],
     }
@@ -233,7 +238,9 @@ def main() -> int:
 
     prompt = load_prompt()
     free = load_free_models()
-    if DEFAULT_BASE not in free:
+    # Copiloto always routes through failover proxy model
+    copiloto_base = PROXY_MODEL if PROXY_MODEL else DEFAULT_BASE
+    if DEFAULT_BASE not in free and not str(DEFAULT_BASE).startswith("synaptika"):
         free = [DEFAULT_BASE] + free
     ollama = load_ollama_models()
     ollama_base = OLLAMA_DEFAULT_BASE if OLLAMA_DEFAULT_BASE in ollama else (
@@ -252,8 +259,8 @@ def main() -> int:
                 "id": "0",
                 "name": "Synaptika Ops",
                 "description": (
-                    "API read-only de los bots Binance/Alpaca en el VPS. "
-                    "Usa digest/status/strategy/activity/equity antes de afirmar datos."
+                    "API Ops: lectura + control (halt/mode/knobs/intents) para "
+                    "Binance y Alpaca paper. Write tools requieren confirm=true."
                 ),
             },
         }
@@ -273,8 +280,9 @@ def main() -> int:
             {
                 "system": prompt,
                 "stream_response": True,
-                "max_tokens": 4096,
+                "max_tokens": 2048,
                 "temperature": 0.4,
+                "function_calling": "native",
             },
         )
         upsert_filter(cur, uid)
@@ -283,7 +291,7 @@ def main() -> int:
             cur,
             model_id=COPILOT_ID,
             user_id=uid,
-            base_model_id=DEFAULT_BASE,
+            base_model_id=copiloto_base,
             name="Synaptika Copiloto",
             prompt=prompt,
         )
@@ -325,7 +333,7 @@ def main() -> int:
         con.close()
 
     print(
-        f"ok copiloto id={COPILOT_ID} base={DEFAULT_BASE} "
+        f"ok copiloto id={COPILOT_ID} base={copiloto_base} "
         f"ollama_copilot={OLLAMA_COPILOT_ID if ollama_base else 'off'} "
         f"base_ollama={ollama_base} free={len(free)} ollama={len(ollama)}"
     )
