@@ -15,23 +15,29 @@ import re
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from telegram_notify_prefs import (
     BTN_ALL,
     BTN_FB,
+    BTN_HERMES,
+    BTN_HERMES_EXIT,
     BTN_SALES_EXIT,
     BTN_SALES_TEST,
     BTN_SCALPER,
     BTN_VIBE,
     BUTTON_TO_MODE,
     filter_keyboard,
+    is_hermes_mode,
     is_sales_test,
     load_env,
     load_prefs,
     mode_label,
     save_prefs,
+    set_hermes_mode,
     set_sales_test,
     should_notify,
     tg_api,
@@ -52,6 +58,9 @@ HELP_TEXT = (
     "Probar ventas:\n"
     f"• {BTN_SALES_TEST} — chat con Messenger sales (bypass owner skip)\n"
     f"• {BTN_SALES_EXIT} — vuelve a trading/comandos\n\n"
+    "Agente Hermes (control VPS):\n"
+    f"• {BTN_HERMES} — hablar con Hermes Agent en este chat\n"
+    f"• {BTN_HERMES_EXIT} — vuelve a trading/comandos\n\n"
     "Botones filtro:\n"
     f"• {BTN_VIBE}\n"
     f"• {BTN_SCALPER}\n"
@@ -548,6 +557,152 @@ def exit_sales_test(chat_id: str) -> None:
     )
 
 
+HERMES_HISTORY_PATH = HOME / "hermes_chat_history.json"
+HERMES_HISTORY_MAX_TURNS = 16  # user+assistant pairs kept in-memory for continuity
+HERMES_SYSTEM = (
+    "Eres Hermes en el VPS Synaptika (Hetzner). Responde en español, breve y concreto.\n"
+    "REGLAS DE CONTEXTO (obligatorias):\n"
+    "- Mantén el hilo: si el usuario dice «ese proceso», «el de más CPU», un PID, "
+    "o «qué hace», usa el último proceso/PID/comando que YA salió en esta conversación. "
+    "NUNCA preguntes «¿a cuál te refieres?» si el contexto ya lo deja claro.\n"
+    "- Si un PID desapareció, dilo en una línea y muestra el top actual de CPU "
+    "(ps/top) enlazándolo con el comando anterior si aplica.\n"
+    "- Usa herramientas (terminal) cuando haga falta; no inventes PIDs ni rutas.\n"
+    "- No pidas más contexto salvo que sea realmente ambiguo (varios candidatos).\n"
+    "- No pegues secretos/API keys en las respuestas."
+)
+
+
+def _load_hermes_history(conversation: str) -> list[dict]:
+    if not HERMES_HISTORY_PATH.exists():
+        return []
+    try:
+        doc = json.loads(HERMES_HISTORY_PATH.read_text(encoding="utf-8"))
+        turns = doc.get(conversation) or []
+        if isinstance(turns, list):
+            return [t for t in turns if isinstance(t, dict) and t.get("role") and t.get("content")]
+    except Exception:  # noqa: BLE001
+        return []
+    return []
+
+
+def _save_hermes_history(conversation: str, turns: list[dict]) -> None:
+    doc: dict = {}
+    if HERMES_HISTORY_PATH.exists():
+        try:
+            doc = json.loads(HERMES_HISTORY_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            doc = {}
+    # keep last N messages (approx turns*2)
+    trimmed = turns[-(HERMES_HISTORY_MAX_TURNS * 2) :]
+    doc[conversation] = trimmed
+    HERMES_HISTORY_PATH.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def clear_hermes_history(conversation: str | None = None) -> None:
+    if not HERMES_HISTORY_PATH.exists():
+        return
+    if conversation is None:
+        HERMES_HISTORY_PATH.unlink(missing_ok=True)
+        return
+    try:
+        doc = json.loads(HERMES_HISTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return
+    doc.pop(conversation, None)
+    HERMES_HISTORY_PATH.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def telegram_typing(chat_id: str) -> None:
+    try:
+        tg_api("sendChatAction", {"chat_id": str(chat_id), "action": "typing"})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def ask_hermes(prompt: str, *, conversation: str = "telegram-owner") -> str:
+    """Call local Hermes API with local multi-turn history (chat/completions is stateless)."""
+    env = load_env()
+    base = (env.get("HERMES_API_URL") or "http://127.0.0.1:8642/v1").rstrip("/")
+    key = env.get("HERMES_API_KEY") or ""
+    if not key:
+        return (
+            "Falta HERMES_API_KEY en /root/.vibe-trading/.env.\n"
+            "Revisa que hermes-gateway esté activo."
+        )
+
+    history = _load_hermes_history(conversation)
+    messages: list[dict] = [{"role": "system", "content": HERMES_SYSTEM}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": prompt})
+
+    body = {
+        "model": "hermes-agent",
+        "messages": messages,
+        "stream": False,
+    }
+    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/chat/completions",
+        data=raw,
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {key}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            data = json.loads(r.read().decode("utf-8") or "{}")
+        choices = data.get("choices") or []
+        if not choices:
+            return f"Hermes sin respuesta útil:\n{json.dumps(data)[:800]}"
+        msg = choices[0].get("message") or {}
+        content = (msg.get("content") or "").strip()
+        if not content:
+            return f"Hermes respondió vacío:\n{json.dumps(data)[:800]}"
+        # Persist this turn so follow-ups keep PID/process context
+        history.append({"role": "user", "content": prompt})
+        history.append({"role": "assistant", "content": content})
+        _save_hermes_history(conversation, history)
+        return content[:3500]
+    except Exception as exc:  # noqa: BLE001
+        print("HERMES_PROXY_FAIL", exc, flush=True)
+        return (
+            f"No pude hablar con Hermes 😅\n{exc}\n"
+            f"URL: {base}/chat/completions\n"
+            f"Toca «{BTN_HERMES_EXIT}» si quieres salir."
+        )
+
+
+def enter_hermes_mode(chat_id: str) -> None:
+    set_hermes_mode(True)
+    # Fresh thread when entering mode (avoids stale PIDs from days ago)
+    clear_hermes_history(f"tg-{chat_id}")
+    send_owner(
+        chat_id,
+        (
+            "Modo Hermes ON ✅\n"
+            "Habla con el agente (control del VPS: systemd, docker, bots, logs).\n"
+            "Los avisos de trading se pausan mientras estés aquí.\n\n"
+            f"Para volver: «{BTN_HERMES_EXIT}» o /trading"
+        ),
+    )
+
+
+def exit_hermes_mode(chat_id: str) -> None:
+    set_hermes_mode(False)
+    clear_hermes_history(f"tg-{chat_id}")
+    send_owner(
+        chat_id,
+        (
+            "Modo Hermes OFF.\n"
+            "Vuelves a comandos de trading / filtro.\n"
+            f"Filtro: {mode_label(load_prefs().get('mode', 'all'))}"
+        ),
+    )
+
+
 def send_strategy_chart(
     chat_id: str,
     *,
@@ -656,8 +811,9 @@ def clear_old_ui(chat_id: str, *, force_send: bool = False) -> None:
                 {"command": "binance", "description": "Grafica Binance v6 smart fast"},
                 {"command": "eth", "description": "Grafica ETH scalping"},
                 {"command": "alpaca", "description": "Grafica Alpaca paper scalping"},
+                {"command": "hermes", "description": "Modo Hermes Agent (control VPS)"},
                 {"command": "sales", "description": "Probar Messenger sales en este chat"},
-                {"command": "trading", "description": "Salir de Messenger sales"},
+                {"command": "trading", "description": "Salir de Hermes / Messenger sales"},
                 {"command": "filtro", "description": "Ver/cambiar filtro de avisos"},
                 {"command": "ayuda", "description": "Lista de comandos"},
             ]
@@ -681,17 +837,42 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
     raw = (text or "").strip()
     low = raw.lower().strip()
 
+    # Hermes enter/exit (always available)
+    if raw == BTN_HERMES or low in ("/hermes", "hermes", "modo hermes"):
+        enter_hermes_mode(chat_id)
+        return
+    if raw == BTN_HERMES_EXIT or low in (
+        "/trading",
+        "trading",
+        "salir hermes",
+        "salir modo hermes",
+    ):
+        # /trading exits both Hermes and sales modes
+        if is_hermes_mode():
+            exit_hermes_mode(chat_id)
+            return
+        if is_sales_test():
+            exit_sales_test(chat_id)
+            return
+        exit_hermes_mode(chat_id)
+        return
+
     # Sales-test enter/exit (always available)
     if raw == BTN_SALES_TEST or low in ("/sales", "sales", "probar sales", "probar messenger sales"):
         enter_sales_test(chat_id)
         return
     if raw == BTN_SALES_EXIT or low in (
-        "/trading",
-        "trading",
         "salir sales",
         "salir messenger sales",
     ):
         exit_sales_test(chat_id)
+        return
+
+    # While talking to Hermes: forward everything else to the agent
+    if is_hermes_mode():
+        telegram_typing(chat_id)
+        reply = ask_hermes(raw, conversation=f"tg-{chat_id}")
+        send_owner(chat_id, reply)
         return
 
     # While testing sales: forward everything else to Synaptica
@@ -784,6 +965,7 @@ class PrefsHandler(BaseHTTPRequestHandler):
                     "mode": api_mode,
                     "filter": mode,
                     "sales_test": bool(prefs.get("sales_test")),
+                    "hermes_mode": bool(prefs.get("hermes_mode")),
                     "fb": should_notify("fb"),
                     "vibe": should_notify("vibe"),
                     "scalper": should_notify("scalper"),

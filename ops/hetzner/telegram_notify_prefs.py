@@ -28,6 +28,8 @@ BTN_FB = "Solo clientes FB"
 BTN_ALL = "Todos (Vibe+Scalper+FB)"
 BTN_SALES_TEST = "Probar Messenger sales"
 BTN_SALES_EXIT = "Salir Messenger sales"
+BTN_HERMES = "Modo Hermes"
+BTN_HERMES_EXIT = "Salir Hermes"
 # legacy button text still accepted
 BTN_BOTH_LEGACY = "Ambas (Vibe + FB)"
 
@@ -77,17 +79,19 @@ def load_prefs() -> dict:
             return {
                 "mode": mode,
                 "sales_test": bool(doc.get("sales_test")),
+                "hermes_mode": bool(doc.get("hermes_mode")),
                 "updated_ts": doc.get("updated_ts"),
             }
         except json.JSONDecodeError:
             pass
-    return {"mode": DEFAULT_MODE, "sales_test": False}
+    return {"mode": DEFAULT_MODE, "sales_test": False, "hermes_mode": False}
 
 
 def _write_prefs(doc: dict) -> dict:
     out = {
         "mode": _normalize_mode(str(doc.get("mode") or DEFAULT_MODE)),
         "sales_test": bool(doc.get("sales_test")),
+        "hermes_mode": bool(doc.get("hermes_mode")),
         "updated_ts": int(time.time()),
     }
     PREFS_PATH.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
@@ -107,6 +111,20 @@ def is_sales_test() -> bool:
 def set_sales_test(enabled: bool) -> dict:
     doc = load_prefs()
     doc["sales_test"] = bool(enabled)
+    if enabled:
+        doc["hermes_mode"] = False
+    return _write_prefs(doc)
+
+
+def is_hermes_mode() -> bool:
+    return bool(load_prefs().get("hermes_mode"))
+
+
+def set_hermes_mode(enabled: bool) -> dict:
+    doc = load_prefs()
+    doc["hermes_mode"] = bool(enabled)
+    if enabled:
+        doc["sales_test"] = False
     return _write_prefs(doc)
 
 
@@ -120,6 +138,10 @@ def should_notify(channel: str) -> bool:
     # While owner is testing Messenger sales in this chat, hush trading digests.
     if is_sales_test() and (channel or "").lower() in ("vibe", "scalper"):
         print("TG_SALES_TEST_SKIP channel=", channel)
+        return False
+    # While talking to Hermes, hush trading digests so the chat stays clean.
+    if is_hermes_mode() and (channel or "").lower() in ("vibe", "scalper"):
+        print("TG_HERMES_MODE_SKIP channel=", channel)
         return False
     ch = (channel or "").lower().strip()
     mode = load_prefs().get("mode") or DEFAULT_MODE
@@ -207,6 +229,14 @@ def send_text(
 
 
 def filter_keyboard() -> dict:
+    if is_hermes_mode():
+        return {
+            "keyboard": [
+                [{"text": BTN_HERMES_EXIT}],
+            ],
+            "resize_keyboard": True,
+            "is_persistent": True,
+        }
     if is_sales_test():
         # Igual que menú persistente de Messenger FB (+ salir solo owner)
         return {
@@ -225,6 +255,7 @@ def filter_keyboard() -> dict:
             [{"text": BTN_FB}],
             [{"text": BTN_ALL}],
             [{"text": BTN_SALES_TEST}],
+            [{"text": BTN_HERMES}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
