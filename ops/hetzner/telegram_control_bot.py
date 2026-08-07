@@ -557,8 +557,71 @@ def exit_sales_test(chat_id: str) -> None:
     )
 
 
+HERMES_HISTORY_PATH = HOME / "hermes_chat_history.json"
+HERMES_HISTORY_MAX_TURNS = 16  # user+assistant pairs kept in-memory for continuity
+HERMES_SYSTEM = (
+    "Eres Hermes en el VPS Synaptika (Hetzner). Responde en español, breve y concreto.\n"
+    "REGLAS DE CONTEXTO (obligatorias):\n"
+    "- Mantén el hilo: si el usuario dice «ese proceso», «el de más CPU», un PID, "
+    "o «qué hace», usa el último proceso/PID/comando que YA salió en esta conversación. "
+    "NUNCA preguntes «¿a cuál te refieres?» si el contexto ya lo deja claro.\n"
+    "- Si un PID desapareció, dilo en una línea y muestra el top actual de CPU "
+    "(ps/top) enlazándolo con el comando anterior si aplica.\n"
+    "- Usa herramientas (terminal) cuando haga falta; no inventes PIDs ni rutas.\n"
+    "- No pidas más contexto salvo que sea realmente ambiguo (varios candidatos).\n"
+    "- No pegues secretos/API keys en las respuestas."
+)
+
+
+def _load_hermes_history(conversation: str) -> list[dict]:
+    if not HERMES_HISTORY_PATH.exists():
+        return []
+    try:
+        doc = json.loads(HERMES_HISTORY_PATH.read_text(encoding="utf-8"))
+        turns = doc.get(conversation) or []
+        if isinstance(turns, list):
+            return [t for t in turns if isinstance(t, dict) and t.get("role") and t.get("content")]
+    except Exception:  # noqa: BLE001
+        return []
+    return []
+
+
+def _save_hermes_history(conversation: str, turns: list[dict]) -> None:
+    doc: dict = {}
+    if HERMES_HISTORY_PATH.exists():
+        try:
+            doc = json.loads(HERMES_HISTORY_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            doc = {}
+    # keep last N messages (approx turns*2)
+    trimmed = turns[-(HERMES_HISTORY_MAX_TURNS * 2) :]
+    doc[conversation] = trimmed
+    HERMES_HISTORY_PATH.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def clear_hermes_history(conversation: str | None = None) -> None:
+    if not HERMES_HISTORY_PATH.exists():
+        return
+    if conversation is None:
+        HERMES_HISTORY_PATH.unlink(missing_ok=True)
+        return
+    try:
+        doc = json.loads(HERMES_HISTORY_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return
+    doc.pop(conversation, None)
+    HERMES_HISTORY_PATH.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def telegram_typing(chat_id: str) -> None:
+    try:
+        tg_api("sendChatAction", {"chat_id": str(chat_id), "action": "typing"})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def ask_hermes(prompt: str, *, conversation: str = "telegram-owner") -> str:
-    """Call local Hermes API server (OpenAI-compatible) with tools enabled."""
+    """Call local Hermes API with local multi-turn history (chat/completions is stateless)."""
     env = load_env()
     base = (env.get("HERMES_API_URL") or "http://127.0.0.1:8642/v1").rstrip("/")
     key = env.get("HERMES_API_KEY") or ""
@@ -567,19 +630,15 @@ def ask_hermes(prompt: str, *, conversation: str = "telegram-owner") -> str:
             "Falta HERMES_API_KEY en /root/.vibe-trading/.env.\n"
             "Revisa que hermes-gateway esté activo."
         )
+
+    history = _load_hermes_history(conversation)
+    messages: list[dict] = [{"role": "system", "content": HERMES_SYSTEM}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": prompt})
+
     body = {
         "model": "hermes-agent",
-        "conversation": conversation,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Eres Hermes en el VPS Synaptika. Responde en español, "
-                    "breve y accionable. Usa herramientas del sistema cuando haga falta."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
+        "messages": messages,
         "stream": False,
     }
     raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -600,9 +659,13 @@ def ask_hermes(prompt: str, *, conversation: str = "telegram-owner") -> str:
             return f"Hermes sin respuesta útil:\n{json.dumps(data)[:800]}"
         msg = choices[0].get("message") or {}
         content = (msg.get("content") or "").strip()
-        if content:
-            return content[:3500]
-        return f"Hermes respondió vacío:\n{json.dumps(data)[:800]}"
+        if not content:
+            return f"Hermes respondió vacío:\n{json.dumps(data)[:800]}"
+        # Persist this turn so follow-ups keep PID/process context
+        history.append({"role": "user", "content": prompt})
+        history.append({"role": "assistant", "content": content})
+        _save_hermes_history(conversation, history)
+        return content[:3500]
     except Exception as exc:  # noqa: BLE001
         print("HERMES_PROXY_FAIL", exc, flush=True)
         return (
@@ -614,6 +677,8 @@ def ask_hermes(prompt: str, *, conversation: str = "telegram-owner") -> str:
 
 def enter_hermes_mode(chat_id: str) -> None:
     set_hermes_mode(True)
+    # Fresh thread when entering mode (avoids stale PIDs from days ago)
+    clear_hermes_history(f"tg-{chat_id}")
     send_owner(
         chat_id,
         (
@@ -627,6 +692,7 @@ def enter_hermes_mode(chat_id: str) -> None:
 
 def exit_hermes_mode(chat_id: str) -> None:
     set_hermes_mode(False)
+    clear_hermes_history(f"tg-{chat_id}")
     send_owner(
         chat_id,
         (
@@ -804,7 +870,7 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
 
     # While talking to Hermes: forward everything else to the agent
     if is_hermes_mode():
-        send_owner(chat_id, "⏳ Hermes pensando…")
+        telegram_typing(chat_id)
         reply = ask_hermes(raw, conversation=f"tg-{chat_id}")
         send_owner(chat_id, reply)
         return
