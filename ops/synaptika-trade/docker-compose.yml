@@ -38,6 +38,8 @@ services:
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     restart: unless-stopped
+    mem_limit: 560m
+    mem_reservation: 256m
     environment:
       - WEBUI_NAME=Synaptika Trade
       - WEBUI_URL=https://synaptika-trade.duckdns.org:8443
@@ -79,6 +81,25 @@ services:
       - DEFAULT_MODEL_PARAMS={"stream_response":true,"max_tokens":2048,"temperature":0.4,"function_calling":"native"}
       - ENABLE_REALTIME_CHAT_SAVE=true
       - CHAT_HISTORY_DIR=/data/chat_history
+      # Efficiency (same chat UX): no local torch embeddings / unused heavy features
+      - RAG_EMBEDDING_ENGINE=openai
+      - RAG_OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
+      - RAG_OPENAI_API_KEY=${OPENROUTER_API_KEY:-}
+      - RAG_EMBEDDING_MODEL=openai/text-embedding-3-small
+      - RAG_EMBEDDING_MODEL_AUTO_UPDATE=false
+      - WHISPER_MODEL_AUTO_UPDATE=false
+      - ENABLE_CODE_EXECUTION=false
+      - ENABLE_CODE_INTERPRETER=false
+      - ENABLE_IMAGE_GENERATION=false
+      - ENABLE_IMAGE_EDIT=false
+      - ENABLE_COMMUNITY_SHARING=false
+      - ENABLE_TAGS_GENERATION=false
+      - ENABLE_AUTOCOMPLETE_GENERATION=false
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - TORCH_NUM_THREADS=1
+      - TOKENIZERS_PARALLELISM=false
     volumes:
       - open_webui:/app/backend/data
       - ./chat_history:/data/chat_history
