@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Write host systemd snapshot for Ops container (mounted via /data/vibe).
+set -euo pipefail
+OUT="${1:-/root/.vibe-trading/host_services.json}"
+python3 - <<'PY' "$OUT"
+import json, subprocess, sys, time
+from pathlib import Path
+
+out = Path(sys.argv[1])
+catalog = [
+    ("vibe-autotrade", "Binance live (smart-fast-v6)"),
+    ("alpaca-paper-scalp15", "Alpaca paper scalp15"),
+    ("alpaca-paper-telegram", "Telegram Alpaca"),
+    ("vibe-telegram", "Telegram Binance"),
+    ("vibe-telegram-control", "Telegram control / Modo Hermes"),
+    ("freqtrade-alpaca-paper", "Freqtrade crypto paper"),
+    ("freqtrade-alpaca-stocks", "Freqtrade stocks paper"),
+    ("vibe-trading", "Vibe API/UI"),
+]
+rows = []
+for unit, title in catalog:
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        st = (r.stdout or "").strip() or "unknown"
+    except Exception:
+        st = "unknown"
+    rows.append({"unit": unit, "title": title, "active": st, "ok": st == "active"})
+doc = {"ts": time.time(), "services": rows}
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(out)
+PY

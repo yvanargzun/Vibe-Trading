@@ -5,16 +5,25 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>{{ brand }} · Ops</title>
   <link rel="icon" href="/static/brand/logo-icon.png"/>
-  <link rel="stylesheet" href="/static/ops/ops.css?v=9"/>
-  <meta http-equiv="refresh" content="30"/>
+  <link rel="stylesheet" href="/static/ops/ops.css?v=11"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+  <script src="/static/ops/dashboard.js?v=11" defer></script>
+  <meta http-equiv="refresh" content="45"/>
 </head>
 <body>
   {% set bn = status.binance %}
   {% set ap = status.alpaca %}
+  {% set s15 = status.alpaca_scalp15 or {} %}
+  {% set ov = status.overview or {} %}
+  {% set cards = ov.cards or [] %}
   {% set briefs = status.strategy.briefs %}
   {% set feed = status.activity.feed %}
   {% set eq_bn = status.equity.binance %}
   {% set eq_ap = status.equity.alpaca %}
+  {% set eq_s15 = status.equity.alpaca_scalp15 or {} %}
+  {% set services = status.services or [] %}
+
+  <script type="application/json" id="initial-status">{{ status|tojson }}</script>
 
   <header>
     <div class="brand">
@@ -25,7 +34,7 @@
       </div>
     </div>
     <div class="header-actions">
-      {% if bn.halt or ap.halt %}<span class="chip warn">HALT</span>{% endif %}
+      {% if bn.halt or ap.halt or s15.halt %}<span class="chip warn">HALT</span>{% endif %}
       <a class="btn ghost sm" href="/ops/chat">Chat IA</a>
       <a class="btn ghost sm" href="/ops/historial">Historial</a>
       <a class="btn ghost sm" href="/logout">Salir</a>
@@ -35,63 +44,137 @@
   <main>
     <section class="hero-actions">
       <div>
-        <h1>Estado del bot</h1>
-        <p class="lead">Datos del VPS (HTML directo). Se refresca cada 30s.</p>
+        <h1>¿Cómo van los bots?</h1>
+        <p class="lead" id="headline">{{ ov.headline or 'Resumen en vivo del VPS. Se actualiza solo.' }}</p>
       </div>
       <a class="btn" href="/ops/chat">Preguntar al copiloto</a>
     </section>
 
-    <div class="grid two">
-      <section class="card">
-        <h2>Binance <span class="chip">{{ bn.mode }}</span>
-          {% if bn.halt %}<span class="chip warn">HALT</span>{% endif %}
-        </h2>
-        <div class="metric">${{ '%.2f'|format(bn.equity or 0) }}</div>
-        <div class="meta">
-          usable ${{ '%.2f'|format(bn.usable or 0) }}
-          · day {{ '%+.2f'|format(bn.day_pnl_pct or 0) }}% (${{ '%.2f'|format(bn.day_pnl or 0) }})
-          · {{ bn.regime }}
-          · buys {{ bn.buys_today if bn.buys_today is not none else '—' }}
-          · legs {{ bn.legs|length }}
-        </div>
-        <p class="meta reason">{{ bn.reason }}</p>
-      </section>
+    {# —— Resumen novato: una fila por bot —— #}
+    <section class="card">
+      <h2>Resumen en una tabla</h2>
+      <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
+        Verde = puede operar · Amarillo = pausa/cuidado · Rojo = detenido
+      </p>
+      <div class="table-wrap">
+        <table class="feed summary-bots">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>Estado</th>
+              <th>Dinero ahora</th>
+              <th>Hoy</th>
+              <th>¿Puede comprar?</th>
+              <th>Modo (fácil)</th>
+              <th>Abiertas</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in cards %}
+              <tr class="traffic-{{ c.traffic.level }}">
+                <td>
+                  <strong>{{ c.name }}</strong>
+                  <div class="meta">{{ c.note }}</div>
+                </td>
+                <td>
+                  <span class="chip traffic-{{ c.traffic.level }}">{{ c.traffic.label }}</span>
+                  <div class="meta">{{ c.traffic.plain }}</div>
+                </td>
+                <td class="num"><strong>${{ '%.2f'|format(c.equity or 0) }}</strong></td>
+                <td class="num {% if (c.day_pnl_pct or 0) > 0 %}ok{% elif (c.day_pnl_pct or 0) < 0 %}bad{% endif %}">
+                  {{ '%+.2f'|format(c.day_pnl_pct or 0) }}%
+                  <div class="meta">${{ '%+.2f'|format(c.day_pnl or 0) }}</div>
+                </td>
+                <td>
+                  {% if c.can_buy %}
+                    <span class="chip ok">Sí</span>
+                  {% else %}
+                    <span class="chip warn">No ahora</span>
+                  {% endif %}
+                </td>
+                <td>{{ c.mode_es }}</td>
+                <td class="num">{{ c.legs }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="7">Sin datos de bots</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
 
-      <section class="card">
-        <h2>Alpaca <span class="chip">{{ ap.mode }}</span>
-          {% if ap.halt %}<span class="chip warn">HALT</span>{% endif %}
-        </h2>
-        <div class="metric">${{ '%.2f'|format(ap.equity or 0) }}</div>
-        <div class="meta">
-          cash {{ ('$%.2f'|format(ap.cash)) if ap.cash is not none else '—' }}
-          · day {{ '%+.2f'|format(ap.day_pnl_pct or 0) }}%
-          · {{ ap.regime }} · {{ ap.strategy }}
-          · legs {{ ap.legs|length }}
-        </div>
-        {% if ap.title %}<p class="meta reason">{{ ap.title }}</p>{% endif %}
-      </section>
+    {# —— Tarjetas grandes —— #}
+    <div class="grid three" style="margin-top:1rem">
+      {% for c in cards %}
+        <section class="card bot-card traffic-border-{{ c.traffic.level }}">
+          <h2>{{ c.name }}
+            <span class="chip traffic-{{ c.traffic.level }}">{{ c.traffic.label }}</span>
+          </h2>
+          <div class="metric">${{ '%.2f'|format(c.equity or 0) }}</div>
+          <p class="meta">{{ c.money_label }}</p>
+          <dl class="kv">
+            <div><dt>Hoy</dt><dd class="{% if (c.day_pnl_pct or 0) >= 0 %}ok{% else %}bad{% endif %}">{{ '%+.2f'|format(c.day_pnl_pct or 0) }}%</dd></div>
+            <div><dt>Modo</dt><dd>{{ c.mode_es }}</dd></div>
+            <div><dt>Mercado</dt><dd>{{ c.regime }}</dd></div>
+            <div><dt>Compras hoy</dt><dd>{{ c.buys_today if c.buys_today is not none else '—' }}</dd></div>
+          </dl>
+          {% if c.reason %}<p class="meta reason">Motivo: {{ c.reason }}</p>{% endif %}
+        </section>
+      {% endfor %}
     </div>
 
+    {# —— Gráficas —— #}
     <section class="card" style="margin-top:1rem">
-      <h2>Posiciones activas</h2>
+      <h2>Gráfica de dinero en el tiempo</h2>
       <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
-        Piernas abiertas ahora · Binance + Alpaca · {{ (status.positions or [])|length }} fila(s)
+        Línea = valor de la cuenta. Sube = ganando · Baja = perdiendo.
+      </p>
+      <div class="grid three charts">
+        <div>
+          <h3 class="chart-title">Binance (real)</h3>
+          <canvas id="chart-bn" height="160"></canvas>
+          <p class="meta" id="eq-bn-meta">
+            inicio {{ eq_bn.start_equity or '—' }} · ahora
+            {% if eq_bn.points %}{{ '%.2f'|format(eq_bn.points[-1].equity) }}{% else %}—{% endif %}
+          </p>
+        </div>
+        <div>
+          <h3 class="chart-title">Alpaca paper</h3>
+          <canvas id="chart-ap" height="160"></canvas>
+          <p class="meta" id="eq-ap-meta">
+            inicio {{ eq_ap.start_equity or '—' }} · ahora
+            {% if eq_ap.points %}{{ '%.2f'|format(eq_ap.points[-1].equity) }}{% else %}—{% endif %}
+          </p>
+        </div>
+        <div>
+          <h3 class="chart-title">Alpaca scalp15</h3>
+          <canvas id="chart-s15" height="160"></canvas>
+          <p class="meta" id="eq-s15-meta">
+            inicio {{ eq_s15.start_equity or '—' }} · ahora
+            {% if eq_s15.points %}{{ '%.2f'|format(eq_s15.points[-1].equity) }}{% else %}—{% endif %}
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:1rem">
+      <h2>Posiciones abiertas ahora</h2>
+      <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
+        Lo que cada bot tiene comprado en este momento · {{ (status.positions or [])|length }} fila(s)
       </p>
       <div class="table-wrap">
         <table class="feed">
           <thead>
             <tr>
-              <th>Venue</th>
-              <th>Asset</th>
-              <th>USD</th>
-              <th>Qty</th>
-              <th>Entry</th>
-              <th>Mark</th>
-              <th>PnL</th>
-              <th>$ PnL</th>
-              <th>Peak</th>
-              <th>Abierta</th>
-              <th>Detalle</th>
+              <th>Bot</th>
+              <th>Qué tiene</th>
+              <th>Valor $</th>
+              <th>Cantidad</th>
+              <th>Precio compra</th>
+              <th>Precio ahora</th>
+              <th>Gan/Pérd %</th>
+              <th>Gan/Pérd $</th>
+              <th>Desde</th>
             </tr>
           </thead>
           <tbody>
@@ -112,15 +195,10 @@
                 <td class="num {% if (L.unreal_usd or 0) > 0 %}ok{% elif (L.unreal_usd or 0) < 0 %}bad{% endif %}">
                   {% if L.unreal_usd is not none %}{{ '%+.2f'|format(L.unreal_usd) }}{% else %}—{% endif %}
                 </td>
-                <td class="num">{% if L.peak is not none %}{{ '%.4g'|format(L.peak) }}{% else %}—{% endif %}</td>
                 <td class="num">{{ L.opened_ts|ts_cdmx }}</td>
-                <td class="meta">
-                  {% if L.score is not none %}score {{ '%.2f'|format(L.score) }}{% endif %}
-                  {% if L.regime %} · {{ L.regime }}{% endif %}
-                </td>
               </tr>
             {% else %}
-              <tr><td colspan="11">Sin posiciones activas ahora</td></tr>
+              <tr><td colspan="9">Ningún bot tiene posiciones abiertas ahora</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -128,24 +206,22 @@
     </section>
 
     <section class="card" style="margin-top:1rem">
-      <h2>Trades (detalle)</h2>
+      <h2>Últimas operaciones (compras y ventas)</h2>
       <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
-        Buys y sells registrados · más recientes primero
+        Más recientes primero · win = ganó · loss = perdió · flat = casi empató
       </p>
       <div class="table-wrap">
         <table class="feed">
           <thead>
             <tr>
               <th>Cuándo</th>
-              <th>Venue</th>
-              <th>Side</th>
-              <th>Symbol</th>
-              <th>USD</th>
-              <th>Price</th>
-              <th>Result</th>
+              <th>Bot</th>
+              <th>Acción</th>
+              <th>Activo</th>
+              <th>$</th>
+              <th>Resultado</th>
               <th>PnL</th>
-              <th>Mode</th>
-              <th>Detalle</th>
+              <th>Nota</th>
             </tr>
           </thead>
           <tbody>
@@ -154,11 +230,12 @@
                 <td class="num">{{ t.ts|ts_cdmx }}</td>
                 <td>{{ t.venue }}</td>
                 <td>
-                  <span class="chip {% if t.side=='buy' %}ok{% else %}{% endif %}">{{ t.side }}</span>
+                  <span class="chip {% if t.side=='buy' %}ok{% endif %}">
+                    {% if t.side=='buy' %}Compra{% elif t.side=='sell' %}Venta{% else %}{{ t.side or '—' }}{% endif %}
+                  </span>
                 </td>
                 <td><strong>{{ t.symbol }}</strong></td>
                 <td class="num">{% if t.usd is not none %}${{ '%.2f'|format(t.usd) }}{% else %}—{% endif %}</td>
-                <td class="num">{% if t.price is not none %}{{ '%.4g'|format(t.price) }}{% else %}—{% endif %}</td>
                 <td>
                   {% if t.result %}
                     <span class="chip {% if t.result=='win' %}ok{% elif t.result=='loss' %}warn{% endif %}">{{ t.result }}</span>
@@ -167,79 +244,10 @@
                 <td class="num {% if (t.pnl_pct or 0) > 0 %}ok{% elif (t.pnl_pct or 0) < 0 %}bad{% endif %}">
                   {% if t.pnl_pct is not none %}{{ '%+.2f'|format(t.pnl_pct * 100) }}%{% else %}—{% endif %}
                 </td>
-                <td>{{ t.mode or '—' }}</td>
-                <td class="meta">
-                  {% if t.kind %}{{ t.kind }}{% endif %}
-                  {% if t.reason %}{% if t.kind %} · {% endif %}{{ t.reason }}{% endif %}
-                  {% if t.regime %} · {{ t.regime }}{% endif %}
-                  {% if t.equity is not none %} · eq ${{ '%.2f'|format(t.equity) }}{% endif %}
-                </td>
+                <td class="meta">{{ t.reason or t.kind or '—' }}</td>
               </tr>
             {% else %}
-              <tr><td colspan="10">Sin trades registrados aún</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    {% set sits = status.situations or {} %}
-    <section class="card" style="margin-top:1rem">
-      <h2>Situaciones Binance</h2>
-      <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
-        Lo que el orquestador ve ahora
-        {% if sits.ts_cdmx %} · actualizado {{ sits.ts_cdmx }} CDMX{% elif sits.ts %} · {{ sits.ts|ts_cdmx }}{% endif %}
-        · mode <strong>{{ sits.mode or bn.mode }}</strong>
-      </p>
-      <ul class="situations">
-        {% for s in sits.situations or [] %}
-          <li class="sit sit-{{ s.level or 'info' }}">
-            <span class="chip {% if s.level=='warn' %}warn{% elif s.level=='ok' %}ok{% endif %}">{{ s.code or s.level }}</span>
-            {{ s.text }}
-          </li>
-        {% else %}
-          <li class="meta">Sin situaciones publicadas aún (espera el próximo tick del bot).</li>
-        {% endfor %}
-      </ul>
-    </section>
-
-    <section class="card" style="margin-top:1rem">
-      <h2>Retroalimentación / recomendaciones</h2>
-      <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
-        Historial post-cierre (solo si hace falta cambiar o confirmar estrategia) · también por Telegram
-      </p>
-      <div class="table-wrap">
-        <table class="feed">
-          <thead>
-            <tr>
-              <th>Fecha CDMX</th>
-              <th>Acción</th>
-              <th>Cierre</th>
-              <th>PnL</th>
-              <th>Recomendación</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for r in status.feedback or [] %}
-              <tr>
-                <td class="num">{{ r.ts_cdmx or (r.ts|ts_cdmx) }}</td>
-                <td>
-                  <span class="chip {% if r.action=='ajustar' %}warn{% else %}ok{% endif %}">{{ r.action or '—' }}</span>
-                </td>
-                <td>
-                  {{ r.symbol or '?' }}
-                  <span class="chip {% if r.result=='win' %}ok{% elif r.result=='loss' %}warn{% endif %}">{{ r.result or '—' }}</span>
-                </td>
-                <td class="num {% if (r.pnl_pct or 0) > 0 %}ok{% elif (r.pnl_pct or 0) < 0 %}bad{% endif %}">
-                  {% if r.pnl_pct is not none %}{{ '%+.2f'|format(r.pnl_pct * 100) }}%{% else %}—{% endif %}
-                </td>
-                <td>
-                  <strong>{{ r.title or '—' }}</strong>
-                  {% if r.detail %}<div class="meta">{{ r.detail }}</div>{% endif %}
-                </td>
-              </tr>
-            {% else %}
-              <tr><td colspan="5">Aún no hay recomendaciones. Aparecen al cerrar un trade cuando el sistema detecta algo útil que decir.</td></tr>
+              <tr><td colspan="8">Aún no hay operaciones registradas</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -247,26 +255,26 @@
     </section>
 
     <section class="card" style="margin-top:1rem">
-      <h2>Wins / Losses</h2>
+      <h2>Marcador: ganadas vs perdidas</h2>
       <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
-        Día CDMX: {{ status.win_loss.today }} · cierres con resultado (win / loss / flat)
+        Día CDMX: {{ status.win_loss.today }} · solo cuentas cierres con resultado
       </p>
       <div class="table-wrap">
         <table class="feed wl-summary">
           <thead>
             <tr>
               <th>Bot</th>
-              <th>Wins</th>
-              <th>Losses</th>
-              <th>Flat</th>
-              <th>Winrate</th>
-              <th>Hoy (W/L)</th>
-              <th>Cerrados</th>
+              <th>Ganadas</th>
+              <th>Perdidas</th>
+              <th>Empate</th>
+              <th>% acierto</th>
+              <th>Hoy (G/P)</th>
             </tr>
           </thead>
           <tbody>
             {% set wl_bn = status.win_loss.binance %}
             {% set wl_ap = status.win_loss.alpaca %}
+            {% set wl_s15 = status.win_loss.alpaca_scalp15 or {} %}
             <tr>
               <td><strong>Binance</strong></td>
               <td class="num ok">{{ wl_bn.wins }}</td>
@@ -274,7 +282,6 @@
               <td class="num">{{ wl_bn.flat }}</td>
               <td class="num">{% if wl_bn.win_rate is not none %}{{ '%.1f'|format(wl_bn.win_rate) }}%{% else %}—{% endif %}</td>
               <td class="num"><span class="ok">{{ wl_bn.wins_today }}</span> / <span class="bad">{{ wl_bn.losses_today }}</span></td>
-              <td class="num">{{ wl_bn.closed }}</td>
             </tr>
             <tr>
               <td><strong>Alpaca</strong></td>
@@ -283,102 +290,65 @@
               <td class="num">{{ wl_ap.flat }}</td>
               <td class="num">{% if wl_ap.win_rate is not none %}{{ '%.1f'|format(wl_ap.win_rate) }}%{% else %}—{% endif %}</td>
               <td class="num"><span class="ok">{{ wl_ap.wins_today }}</span> / <span class="bad">{{ wl_ap.losses_today }}</span></td>
-              <td class="num">{{ wl_ap.closed }}</td>
+            </tr>
+            <tr>
+              <td><strong>scalp15</strong></td>
+              <td class="num ok">{{ wl_s15.wins or 0 }}</td>
+              <td class="num bad">{{ wl_s15.losses or 0 }}</td>
+              <td class="num">{{ wl_s15.flat or 0 }}</td>
+              <td class="num">{% if wl_s15.win_rate is not none %}{{ '%.1f'|format(wl_s15.win_rate) }}%{% else %}—{% endif %}</td>
+              <td class="num"><span class="ok">{{ wl_s15.wins_today or 0 }}</span> / <span class="bad">{{ wl_s15.losses_today or 0 }}</span></td>
             </tr>
           </tbody>
         </table>
       </div>
-
-      <div class="grid two" style="margin-top:1rem">
-        <div>
-          <h3 class="chart-title">Últimos cierres · Binance</h3>
-          <div class="table-wrap">
-            <table class="feed">
-              <thead><tr><th>Cuándo</th><th>Symbol</th><th>Result</th><th>PnL</th></tr></thead>
-              <tbody>
-                {% for r in wl_bn.recent[:8] %}
-                  <tr>
-                    <td>{{ r.ts|ts_cdmx }}</td>
-                    <td>{{ r.symbol }}</td>
-                    <td><span class="chip {% if r.result=='win' %}ok{% elif r.result=='loss' %}warn{% endif %}">{{ r.result }}</span></td>
-                    <td class="num {% if (r.pnl_pct or 0) > 0 %}ok{% elif (r.pnl_pct or 0) < 0 %}bad{% endif %}">
-                      {% if r.pnl_pct is not none %}{{ '%+.2f'|format(r.pnl_pct * 100) }}%{% else %}—{% endif %}
-                    </td>
-                  </tr>
-                {% else %}
-                  <tr><td colspan="4">Sin cierres registrados aún</td></tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div>
-          <h3 class="chart-title">Últimos cierres · Alpaca</h3>
-          <div class="table-wrap">
-            <table class="feed">
-              <thead><tr><th>Cuándo</th><th>Symbol</th><th>Result</th><th>PnL</th></tr></thead>
-              <tbody>
-                {% for r in wl_ap.recent[:8] %}
-                  <tr>
-                    <td>{{ r.ts|ts_cdmx }}</td>
-                    <td>{{ r.symbol }}{% if r.sleeve %} · {{ r.sleeve }}{% endif %}</td>
-                    <td><span class="chip {% if r.result=='win' %}ok{% elif r.result=='loss' %}warn{% endif %}">{{ r.result }}</span></td>
-                    <td class="num {% if (r.pnl_pct or 0) > 0 %}ok{% elif (r.pnl_pct or 0) < 0 %}bad{% endif %}">
-                      {% if r.pnl_pct_display is not none %}{{ '%+.2f'|format(r.pnl_pct_display) }}%
-                      {% elif r.pnl_pct is not none %}{{ '%+.2f'|format(r.pnl_pct * 100) }}%
-                      {% else %}—{% endif %}
-                    </td>
-                  </tr>
-                {% else %}
-                  <tr><td colspan="4">Sin cierres registrados aún</td></tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
     </section>
 
+    {% set sits = status.situations or {} %}
     <section class="card" style="margin-top:1rem">
-      <h2>Estrategias</h2>
-      <div class="grid two">
-        {% for key in ['binance','alpaca'] %}
-          {% set brief = briefs.get(key) %}
-          {% if brief %}
-          <div class="strategy-block">
-            <h3>{{ brief.title }}</h3>
-            <p>{{ brief.summary }}</p>
-            <p class="meta">{{ brief.style }}</p>
-            <ul class="knob-list">
-              {% for k,v in brief.knobs.items() %}
-                <li><strong>{{ k }}</strong>: {{ v }}</li>
-              {% endfor %}
-            </ul>
-          </div>
-          {% endif %}
+      <h2>Qué está pasando ahora (Binance)</h2>
+      <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
+        Explicación corta del orquestador
+        {% if sits.ts_cdmx %} · {{ sits.ts_cdmx }} CDMX{% endif %}
+      </p>
+      <ul class="situations">
+        {% for s in sits.situations or [] %}
+          <li class="sit sit-{{ s.level or 'info' }}">
+            <span class="chip {% if s.level=='warn' %}warn{% elif s.level=='ok' %}ok{% endif %}">{{ s.code or s.level }}</span>
+            {{ s.text }}
+          </li>
+        {% else %}
+          <li class="meta">Sin avisos nuevos. Espera el próximo ciclo del bot.</li>
         {% endfor %}
-      </div>
+      </ul>
     </section>
 
     <section class="card" style="margin-top:1rem">
-      <h2>Equity</h2>
-      <div class="grid two charts">
-        <div>
-          <h3 class="chart-title">Binance ({{ (eq_bn.points or [])|length }} pts)</h3>
-          {{ eq_bn.points|sparkline|safe }}
-          <p class="meta">
-            start {{ eq_bn.start_equity }} · last
-            {% if eq_bn.points %}{{ '%.2f'|format(eq_bn.points[-1].equity) }}{% else %}—{% endif %}
-          </p>
-        </div>
-        <div>
-          <h3 class="chart-title">Alpaca ({{ (eq_ap.points or [])|length }} pts)</h3>
-          {{ eq_ap.points|sparkline|safe }}
-          <p class="meta">
-            start {{ eq_ap.start_equity }} · last
-            {% if eq_ap.points %}{{ '%.2f'|format(eq_ap.points[-1].equity) }}{% else %}—{% endif %}
-          </p>
-        </div>
+      <h2>Servicios del VPS (¿están encendidos?)</h2>
+      <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
+        Lo que Hermes también puede ver con <code>synaptika-status</code>
+      </p>
+      <div class="table-wrap">
+        <table class="feed">
+          <thead><tr><th>Servicio</th><th>Qué hace</th><th>Estado</th></tr></thead>
+          <tbody>
+            {% for s in services %}
+              <tr>
+                <td><code>{{ s.unit }}</code></td>
+                <td>{{ s.title }}</td>
+                <td>
+                  {% if s.ok %}
+                    <span class="chip ok">encendido</span>
+                  {% else %}
+                    <span class="chip warn">{{ s.active }}</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="3">No se pudo leer systemd desde el contenedor Ops</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -387,10 +357,10 @@
       <div class="table-wrap">
         <table class="feed">
           <thead>
-            <tr><th>Cuándo</th><th>Fuente</th><th>Tipo</th><th>Detalle</th></tr>
+            <tr><th>Cuándo</th><th>Bot</th><th>Tipo</th><th>Detalle</th></tr>
           </thead>
           <tbody>
-            {% for row in feed[:40] %}
+            {% for row in feed[:30] %}
               <tr>
                 <td>{{ row.ts|ts_cdmx }}</td>
                 <td>{{ row.source or '—' }}</td>
@@ -404,7 +374,40 @@
         </table>
       </div>
     </section>
+
+    <details class="card" style="margin-top:1rem">
+      <summary><strong>Estrategias (detalle técnico)</strong> · toca para abrir</summary>
+      <div class="grid two" style="margin-top:.75rem">
+        {% for key in ['binance','alpaca','alpaca_scalp15'] %}
+          {% set brief = briefs.get(key) %}
+          {% if brief %}
+          <div class="strategy-block">
+            <h3>{{ brief.title }}</h3>
+            <p>{{ brief.summary }}</p>
+            <p class="meta">{{ brief.style }}</p>
+            <ul class="knob-list">
+              {% for k,v in (brief.knobs or {}).items() %}
+                <li><strong>{{ k }}</strong>: {{ v }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </details>
+
+    <section class="card glossary" style="margin-top:1rem">
+      <h2>Glosario rápido</h2>
+      <dl class="glossary-list">
+        {% for g in ov.glossary or [] %}
+          <div>
+            <dt>{{ g.term }}</dt>
+            <dd>{{ g.mean }}</dd>
+          </div>
+        {% endfor %}
+      </dl>
+    </section>
   </main>
-  <footer>{{ brand }} · datos locales del VPS · read-only · <a href="/ops/chat">chat</a></footer>
+  <footer>{{ brand }} · datos del VPS · solo lectura · <a href="/ops/chat">chat</a></footer>
 </body>
 </html>

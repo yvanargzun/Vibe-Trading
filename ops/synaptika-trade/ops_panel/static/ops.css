@@ -48,6 +48,7 @@ h3.chart-title { margin: 0 0 .5rem; font-size: .9rem; color: var(--muted); font-
 }
 .grid { display: grid; gap: 1rem; }
 .grid.two { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.grid.three { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
 .card {
   background: var(--card);
   border: 1px solid var(--line);
@@ -69,6 +70,38 @@ h3.chart-title { margin: 0 0 .5rem; font-size: .9rem; color: var(--muted); font-
 }
 .chip.warn { background: #fef2f2; color: var(--bad); }
 .chip.ok { background: #ecfdf5; color: var(--ok); }
+.chip.traffic-green { background: #ecfdf5; color: var(--ok); }
+.chip.traffic-yellow { background: #fffbeb; color: #b45309; }
+.chip.traffic-red { background: #fef2f2; color: var(--bad); }
+tr.traffic-green td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
+tr.traffic-yellow td:first-child { box-shadow: inset 3px 0 0 #f59e0b; }
+tr.traffic-red td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
+.bot-card.traffic-border-green { border-color: #a7f3d0; }
+.bot-card.traffic-border-yellow { border-color: #fcd34d; }
+.bot-card.traffic-border-red { border-color: #fecaca; }
+dl.kv {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .45rem .75rem;
+  margin: .85rem 0 0;
+}
+dl.kv dt { color: var(--muted); font-size: .78rem; margin: 0; }
+dl.kv dd { margin: .1rem 0 0; font-weight: 650; font-size: .95rem; }
+.glossary-list {
+  display: grid;
+  gap: .65rem;
+  margin: 0;
+}
+.glossary-list dt { font-weight: 700; }
+.glossary-list dd { margin: .15rem 0 0; color: var(--muted); font-size: .92rem; line-height: 1.4; }
+details.card > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 1.05rem;
+}
+details.card > summary::-webkit-details-marker { display: none; }
+table.summary-bots td { font-size: .92rem; }
+code { font-size: .85em; background: #f1f5f9; padding: .1rem .35rem; border-radius: 6px; }
 .hidden { display: none !important; }
 ul.legs { margin: .6rem 0 0; padding: 0; list-style: none; }
 ul.legs li {
@@ -101,6 +134,12 @@ ul.legs li {
 }
 .strategy-block h3 { margin: 0 0 .4rem; font-size: 1rem; }
 .strategy-block p { margin: 0 0 .5rem; color: var(--muted); font-size: .92rem; line-height: 1.4; }
+.strategy-block.live {
+  outline: 1px solid color-mix(in srgb, var(--ok) 45%, transparent);
+  border-radius: 10px;
+  padding: .75rem;
+  background: color-mix(in srgb, var(--ok) 6%, transparent);
+}
 .knob-list { margin: 0; padding-left: 1.1rem; color: var(--ink); font-size: .88rem; }
 .knob-list li { margin: .15rem 0; }
 .table-wrap { overflow-x: auto; }

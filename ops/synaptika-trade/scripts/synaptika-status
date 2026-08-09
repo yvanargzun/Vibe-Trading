@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Full Synaptika VPS + bots status for Hermes / operators (plain Spanish).
+set -euo pipefail
+
+OPS_URL="${OPS_URL:-http://127.0.0.1:8787}"
+SECRETS="${SECRETS:-/root/synaptika-trade/secrets.env}"
+KEY=""
+if [[ -f "$SECRETS" ]]; then
+  # shellcheck disable=SC1090
+  KEY="$(grep '^OPS_API_KEY=' "$SECRETS" | head -1 | cut -d= -f2- || true)"
+fi
+
+echo "=== Synaptika status · $(date -u '+%Y-%m-%d %H:%M UTC') ==="
+echo
+
+# Prefer Ops hermes digest (covers Binance + Alpaca + scalp15 + overview)
+if [[ -n "$KEY" ]] && curl -sf -m 8 -H "X-Ops-Key: $KEY" "$OPS_URL/ops/api/hermes" >/tmp/synaptika-hermes.json 2>/dev/null; then
+  python3 - <<'PY'
+import json
+from pathlib import Path
+doc = json.loads(Path("/tmp/synaptika-hermes.json").read_text())
+text = doc.get("text") or ""
+print(text[:12000] if text else json.dumps(doc.get("overview") or {}, ensure_ascii=False, indent=2)[:4000])
+PY
+else
+  echo "(Ops API no disponible — fallback local)"
+  echo
+  /usr/local/bin/vibe-status 2>/dev/null || true
+  echo
+  for home in /root/.alpaca-paper /root/.alpaca-scalp15; do
+    if [[ -f "$home/state.json" ]]; then
+      python3 - <<PY
+import json
+from pathlib import Path
+home = Path("$home")
+st = json.loads((home / "state.json").read_text())
+print(f"[{home.name}] equity={st.get('equity') or st.get('last_equity')} mode={st.get('active_mode') or st.get('mode')} halt={(home/'HALT').exists()}")
+PY
+    fi
+  done
+fi
+
+echo
+echo "=== systemd (host) ==="
+for u in vibe-autotrade alpaca-paper-scalp15 vibe-telegram vibe-telegram-control freqtrade-alpaca-paper freqtrade-alpaca-stocks vibe-trading; do
+  printf "%-32s %s\n" "$u" "$(systemctl is-active "$u" 2>/dev/null || echo n/a)"
+done
+
+# Refresh host_services.json for Ops container
+if [[ -x /usr/local/bin/synaptika-host-status-write ]]; then
+  /usr/local/bin/synaptika-host-status-write >/dev/null 2>&1 || true
+fi
