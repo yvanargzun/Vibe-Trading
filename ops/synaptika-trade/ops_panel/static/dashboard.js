@@ -2,7 +2,8 @@
 (function () {
   const REFRESH_MS = 20000;
   let chartBn = null;
-  let chartAp = None;
+  let chartAp = null;
+  let chartS15 = null;
 
   function $(id) {
     return document.getElementById(id);
@@ -95,6 +96,7 @@
     const order = [
       ["binance", briefs.binance, live && live.binance],
       ["alpaca", briefs.alpaca, live && live.alpaca],
+      ["alpaca_scalp15", briefs.alpaca_scalp15, live && live.alpaca_scalp15],
     ];
     for (const [key, brief, livePart] of order) {
       if (!brief) continue;
@@ -231,21 +233,24 @@
 
     const bn = data.binance || {};
     const ap = data.alpaca || {};
+    const s15 = data.alpaca_scalp15 || {};
     renderVenue("bn", bn);
     renderVenue("ap", ap);
 
-    const anyHalt = !!(bn.halt || ap.halt);
+    const anyHalt = !!(bn.halt || ap.halt || s15.halt);
     const banner = $("halt-banner");
     if (banner) banner.classList.toggle("hidden", !anyHalt);
 
     renderStrategy((data.strategy && data.strategy.briefs) || {}, {
       binance: bn,
       alpaca: ap,
+      alpaca_scalp15: s15,
     });
 
     const eq = data.equity || {};
     chartBn = upsertChart("chart-bn", chartBn, "Binance", eq.binance, "#2563eb");
     chartAp = upsertChart("chart-ap", chartAp, "Alpaca", eq.alpaca, "#0f172a");
+    chartS15 = upsertChart("chart-s15", chartS15, "scalp15", eq.alpaca_scalp15, "#0d9488");
 
     renderFeed((data.activity && data.activity.feed) || []);
     const updated = $("last-updated");

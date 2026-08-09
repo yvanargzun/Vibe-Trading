@@ -11,10 +11,12 @@
 <body>
   {% set bn = status.binance %}
   {% set ap = status.alpaca %}
+  {% set s15 = status.alpaca_scalp15 or {} %}
   {% set briefs = status.strategy.briefs %}
   {% set feed = status.activity.feed %}
   {% set eq_bn = status.equity.binance %}
   {% set eq_ap = status.equity.alpaca %}
+  {% set eq_s15 = status.equity.alpaca_scalp15 or {} %}
 
   <header>
     <div class="brand">
@@ -25,7 +27,7 @@
       </div>
     </div>
     <div class="header-actions">
-      {% if bn.halt or ap.halt %}<span class="chip warn">HALT</span>{% endif %}
+      {% if bn.halt or ap.halt or s15.halt %}<span class="chip warn">HALT</span>{% endif %}
       <a class="btn ghost sm" href="/ops/chat">Chat IA</a>
       <a class="btn ghost sm" href="/ops/historial">Historial</a>
       <a class="btn ghost sm" href="/logout">Salir</a>
@@ -73,9 +75,24 @@
     </div>
 
     <section class="card" style="margin-top:1rem">
+      <h2>Alpaca scalp15 <span class="chip">{{ s15.mode or 'scalp15' }}</span>
+        {% if s15.halt %}<span class="chip warn">HALT</span>{% endif %}
+      </h2>
+      <div class="metric">${{ '%.2f'|format(s15.equity or 0) }}</div>
+      <div class="meta">
+        day {{ '%+.2f'|format(s15.day_pnl_pct or 0) }}%
+        · {{ s15.regime or '?' }} · {{ s15.strategy or 'scalp15' }}
+        · buys {{ s15.buys_today if s15.buys_today is not none else '—' }}
+        · legs {{ (s15.legs or [])|length }}
+        · last {{ s15.last_symbol or '—' }}
+      </div>
+      <p class="meta reason">{{ s15.title or 'Momentum 15m · cuenta paper aparte' }}</p>
+    </section>
+
+    <section class="card" style="margin-top:1rem">
       <h2>Posiciones activas</h2>
       <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
-        Piernas abiertas ahora · Binance + Alpaca · {{ (status.positions or [])|length }} fila(s)
+        Piernas abiertas ahora · Binance + Alpaca + scalp15 · {{ (status.positions or [])|length }} fila(s)
       </p>
       <div class="table-wrap">
         <table class="feed">
@@ -267,6 +284,7 @@
           <tbody>
             {% set wl_bn = status.win_loss.binance %}
             {% set wl_ap = status.win_loss.alpaca %}
+            {% set wl_s15 = status.win_loss.alpaca_scalp15 or {} %}
             <tr>
               <td><strong>Binance</strong></td>
               <td class="num ok">{{ wl_bn.wins }}</td>
@@ -284,6 +302,15 @@
               <td class="num">{% if wl_ap.win_rate is not none %}{{ '%.1f'|format(wl_ap.win_rate) }}%{% else %}—{% endif %}</td>
               <td class="num"><span class="ok">{{ wl_ap.wins_today }}</span> / <span class="bad">{{ wl_ap.losses_today }}</span></td>
               <td class="num">{{ wl_ap.closed }}</td>
+            </tr>
+            <tr>
+              <td><strong>scalp15</strong></td>
+              <td class="num ok">{{ wl_s15.wins or 0 }}</td>
+              <td class="num bad">{{ wl_s15.losses or 0 }}</td>
+              <td class="num">{{ wl_s15.flat or 0 }}</td>
+              <td class="num">{% if wl_s15.win_rate is not none %}{{ '%.1f'|format(wl_s15.win_rate) }}%{% else %}—{% endif %}</td>
+              <td class="num"><span class="ok">{{ wl_s15.wins_today or 0 }}</span> / <span class="bad">{{ wl_s15.losses_today or 0 }}</span></td>
+              <td class="num">{{ wl_s15.closed or 0 }}</td>
             </tr>
           </tbody>
         </table>
@@ -337,12 +364,36 @@
           </div>
         </div>
       </div>
+      <div style="margin-top:1rem">
+        <h3 class="chart-title">Últimos cierres · scalp15</h3>
+        <div class="table-wrap">
+          <table class="feed">
+            <thead><tr><th>Cuándo</th><th>Symbol</th><th>Result</th><th>PnL</th></tr></thead>
+            <tbody>
+              {% for r in (wl_s15.recent or [])[:8] %}
+                <tr>
+                  <td>{{ r.ts|ts_cdmx }}</td>
+                  <td>{{ r.symbol }}</td>
+                  <td><span class="chip {% if r.result=='win' %}ok{% elif r.result=='loss' %}warn{% endif %}">{{ r.result }}</span></td>
+                  <td class="num {% if (r.pnl_pct or 0) > 0 %}ok{% elif (r.pnl_pct or 0) < 0 %}bad{% endif %}">
+                    {% if r.pnl_pct_display is not none %}{{ '%+.2f'|format(r.pnl_pct_display) }}%
+                    {% elif r.pnl_pct is not none %}{{ '%+.2f'|format(r.pnl_pct * 100) }}%
+                    {% else %}—{% endif %}
+                  </td>
+                </tr>
+              {% else %}
+                <tr><td colspan="4">Sin cierres registrados aún</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <section class="card" style="margin-top:1rem">
       <h2>Estrategias</h2>
       <div class="grid two">
-        {% for key in ['binance','alpaca'] %}
+        {% for key in ['binance','alpaca','alpaca_scalp15'] %}
           {% set brief = briefs.get(key) %}
           {% if brief %}
           <div class="strategy-block">
@@ -379,6 +430,14 @@
             {% if eq_ap.points %}{{ '%.2f'|format(eq_ap.points[-1].equity) }}{% else %}—{% endif %}
           </p>
         </div>
+      </div>
+      <div style="margin-top:1rem">
+        <h3 class="chart-title">Alpaca scalp15 ({{ (eq_s15.points or [])|length }} pts)</h3>
+        {{ (eq_s15.points or [])|sparkline|safe }}
+        <p class="meta">
+          start {{ eq_s15.start_equity }} · last
+          {% if eq_s15.points %}{{ '%.2f'|format(eq_s15.points[-1].equity) }}{% else %}—{% endif %}
+        </p>
       </div>
     </section>
 

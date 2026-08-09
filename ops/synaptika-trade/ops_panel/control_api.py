@@ -168,7 +168,7 @@ def openapi_write_paths() -> dict:
         "/ops/api/control/notify": {
             "post": {
                 "operationId": "set_notify_filter",
-                "summary": "Filtro Telegram vibe|scalper|fb|all",
+                "summary": "Filtro Telegram vibe|scalp15|fb|all",
                 "description": confirm_note,
                 "requestBody": write_body,
                 "responses": {"200": {"description": "OK"}},

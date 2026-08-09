@@ -33,9 +33,61 @@ LETSENCRYPT_EMAIL=yvan@synaptika.local
 OPS_PASSWORD=SynaptikaTrade2026!
 OPS_API_KEY=REPLACE_WITH_RANDOM_HEX
 OPENAI_API_KEY=
-OPENAI_API_BASE_URL=https://api.openai.com/v1
+OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OLLAMA_API_KEY=
+OLLAMA_CLOUD_BASE_URL=https://ollama.com/v1
+OLLAMA_DEFAULT_MODEL=deepseek-v4-flash
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.0-flash
+LLM_PROXY_MODEL=synaptika-auto
 EOF
   chmod 600 "$DEST/secrets.env"
+fi
+
+# Ensure OpenRouter / failover keys exist on older secrets files
+ensure_kv() {
+  local key="$1" val="$2"
+  if ! grep -q "^${key}=" "$DEST/secrets.env" 2>/dev/null; then
+    echo "${key}=${val}" >> "$DEST/secrets.env"
+  fi
+}
+ensure_kv OPENAI_API_BASE_URL "https://openrouter.ai/api/v1"
+ensure_kv OPENROUTER_BASE_URL "https://openrouter.ai/api/v1"
+ensure_kv OLLAMA_CLOUD_BASE_URL "https://ollama.com/v1"
+ensure_kv OLLAMA_DEFAULT_MODEL "deepseek-v4-flash"
+ensure_kv GEMINI_MODEL "gemini-2.0-flash"
+ensure_kv LLM_PROXY_MODEL "synaptika-auto"
+# Prefer real OpenRouter base if older template pointed at api.openai.com
+if grep -q '^OPENAI_API_BASE_URL=https://api.openai.com' "$DEST/secrets.env" 2>/dev/null; then
+  sed -i 's#^OPENAI_API_BASE_URL=https://api.openai.com/v1#OPENAI_API_BASE_URL=https://openrouter.ai/api/v1#' "$DEST/secrets.env"
+fi
+# Import GEMINI / OPENROUTER from trading env if portal secrets are empty
+for AGENT_ENV in /root/.vibe-trading/agent.env /root/.vibe-trading/.env; do
+  if [ -f "$AGENT_ENV" ]; then
+    for key in GEMINI_API_KEY GEMINI_MODEL OPENROUTER_API_KEY; do
+      cur=$(grep -E "^${key}=" "$DEST/secrets.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+      src=$(grep -E "^${key}=" "$AGENT_ENV" 2>/dev/null | head -1 | cut -d= -f2- || true)
+      if [ -z "$cur" ] && [ -n "$src" ]; then
+        if grep -q "^${key}=" "$DEST/secrets.env" 2>/dev/null; then
+          sed -i "s|^${key}=.*|${key}=${src}|" "$DEST/secrets.env"
+        else
+          echo "${key}=${src}" >> "$DEST/secrets.env"
+        fi
+      fi
+    done
+  fi
+done
+# Mirror OPENAI_API_KEY into OPENROUTER_API_KEY when missing
+or_cur=$(grep -E '^OPENROUTER_API_KEY=' "$DEST/secrets.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+oa_cur=$(grep -E '^OPENAI_API_KEY=' "$DEST/secrets.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+if [ -z "$or_cur" ] && [ -n "$oa_cur" ]; then
+  if grep -q '^OPENROUTER_API_KEY=' "$DEST/secrets.env" 2>/dev/null; then
+    sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${oa_cur}|" "$DEST/secrets.env"
+  else
+    echo "OPENROUTER_API_KEY=${oa_cur}" >> "$DEST/secrets.env"
+  fi
 fi
 
 # Ensure OPS_API_KEY exists on older secrets files
@@ -80,6 +132,7 @@ source "$DEST/secrets.env"
 set +a
 export LETSENCRYPT_EMAIL OPS_PASSWORD OPS_API_KEY OPENAI_API_KEY OPENAI_API_BASE_URL
 export OLLAMA_API_KEY OLLAMA_CLOUD_BASE_URL OLLAMA_DEFAULT_MODEL
+export OPENROUTER_API_KEY OPENROUTER_BASE_URL GEMINI_API_KEY GEMINI_MODEL LLM_PROXY_MODEL
 
 cd "$DEST"
 ln -sfn secrets.env .env
@@ -89,16 +142,21 @@ docker compose --env-file secrets.env up -d --build
 sleep 8
 # Force Open WebUI DB: free models + Ollama Cloud + copiloto
 docker compose --env-file secrets.env exec -T \
-  -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-  -e OPENAI_API_BASE_URL="${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1}" \
+  -e OPENAI_UPSTREAM_API_KEY="${OPENAI_API_KEY:-}" \
+  -e OPENAI_UPSTREAM_BASE_URL="${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1}" \
+  -e OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}}" \
+  -e OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}" \
   -e OLLAMA_API_KEY="${OLLAMA_API_KEY:-}" \
   -e OLLAMA_CLOUD_BASE_URL="${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}" \
+  -e LLM_PROXY_MODEL="${LLM_PROXY_MODEL:-synaptika-auto}" \
   open-webui python3 /srv/webui/apply_free_models.py || true
 docker compose --env-file secrets.env exec -T \
   -e OPS_API_KEY="${OPS_API_KEY:-}" \
   -e OLLAMA_API_KEY="${OLLAMA_API_KEY:-}" \
   -e OLLAMA_CLOUD_BASE_URL="${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}" \
   -e OLLAMA_DEFAULT_MODEL="${OLLAMA_DEFAULT_MODEL:-deepseek-v4-flash}" \
+  -e DEFAULT_MODELS="${LLM_PROXY_MODEL:-synaptika-auto}" \
+  -e LLM_PROXY_MODEL="${LLM_PROXY_MODEL:-synaptika-auto}" \
   -e CHAT_HISTORY_DIR=/data/chat_history \
   open-webui python3 /srv/webui/apply_copilot.py || true
 docker compose --env-file secrets.env exec -T \

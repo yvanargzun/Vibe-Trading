@@ -217,7 +217,17 @@ def alpaca_snapshot(alpaca: Path) -> dict:
 
 
 def equity_series(home: Path, limit: int = 400) -> dict:
-    hist = read_json(home / "equity_history.json")
+    path = home / "equity_history.json"
+    hist: dict[str, Any] = {}
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                hist = raw
+            elif isinstance(raw, list):
+                hist = {"points": raw, "markers": [], "start_equity": None}
+        except (OSError, json.JSONDecodeError, TypeError):
+            hist = {}
     points = list(hist.get("points") or [])[-limit:]
     markers = list(hist.get("markers") or [])[-80:]
     clean_pts = []
@@ -239,8 +249,11 @@ def equity_series(home: Path, limit: int = 400) -> dict:
             )
         except (KeyError, TypeError, ValueError):
             continue
+    start = hist.get("start_equity")
+    if start is None and clean_pts:
+        start = clean_pts[0]["equity"]
     return {
-        "start_equity": hist.get("start_equity"),
+        "start_equity": start,
         "points": clean_pts,
         "markers": clean_mk,
     }
@@ -430,11 +443,56 @@ def alpaca_closes(alpaca: Path) -> list[dict]:
     return out
 
 
+def scalp15_closes(home: Path | None = None) -> list[dict]:
+    home = home or _scalp15_home()
+    st = read_json(home / "state.json")
+    out: list[dict] = []
+    for ex in st.get("exits") or []:
+        if not isinstance(ex, dict):
+            continue
+        res = _classify_result(None, ex.get("pnl_pct"), pct_is_percent=True)
+        if not res:
+            continue
+        frac = None
+        try:
+            frac = float(ex.get("pnl_pct")) / 100.0
+        except (TypeError, ValueError):
+            frac = None
+        out.append(
+            {
+                "ts": ex.get("ts"),
+                "day": _ts_to_day_cdmx(ex.get("ts")),
+                "symbol": ex.get("asset") or "?",
+                "result": res,
+                "pnl_pct": frac,
+                "pnl_pct_display": ex.get("pnl_pct"),
+                "reason": ex.get("reason"),
+                "kind": ex.get("kind"),
+                "sleeve": "scalp15",
+                "source": "exits",
+            }
+        )
+
+    def _key(row: dict) -> float:
+        ts = row.get("ts") or ""
+        try:
+            if isinstance(ts, (int, float)):
+                return float(ts)
+            s = str(ts).replace("Z", "+00:00")
+            return datetime.fromisoformat(s).timestamp()
+        except Exception:
+            return 0.0
+
+    out.sort(key=_key)
+    return out
+
+
 def win_loss_table(vibe: Path, alpaca: Path) -> dict:
     today = _today_cdmx()
     bn = _stats_from_closes(binance_closes(vibe), today)
     ap = _stats_from_closes(alpaca_closes(alpaca), today)
-    return {"today": today, "binance": bn, "alpaca": ap}
+    s15 = _stats_from_closes(scalp15_closes(), today)
+    return {"today": today, "binance": bn, "alpaca": ap, "alpaca_scalp15": s15}
 
 
 def live_situations(vibe: Path) -> dict[str, Any]:
@@ -567,6 +625,8 @@ def trade_ledger(vibe: Path, alpaca: Path, limit: int = 50) -> list[dict]:
         _push("binance", r)
     for r in recent_trades(alpaca, max(limit, 40)):
         _push("alpaca", r)
+    for r in recent_trades(_scalp15_home(), max(limit, 40)):
+        _push("alpaca_scalp15", r)
 
     def _key(row: dict) -> float:
         try:
@@ -588,6 +648,9 @@ def open_positions_table(vibe: Path, alpaca: Path) -> list[dict]:
     ap = alpaca_snapshot(alpaca)
     for L in ap.get("legs") or []:
         rows.append({"venue": "alpaca", **L})
+    s15 = alpaca_scalp15_snapshot(_scalp15_home())
+    for L in s15.get("legs") or []:
+        rows.append({"venue": "alpaca_scalp15", **L})
     return rows
 
 
@@ -595,6 +658,8 @@ def activity(vibe: Path, alpaca: Path, limit: int = 40) -> dict:
     cycles = list(reversed(recent_cycles(vibe, min(limit, 20))))
     trades_bn = recent_trades(vibe, limit)
     trades_ap = recent_trades(alpaca, limit)
+    s15_home = _scalp15_home()
+    trades_s15 = recent_trades(s15_home, limit)
     skips_bn = recent_skips(vibe, limit)
     skips_ap = recent_skips(alpaca, min(limit, 20))
     feed: list[dict] = []
@@ -602,6 +667,8 @@ def activity(vibe: Path, alpaca: Path, limit: int = 40) -> dict:
         feed.append({"source": "binance", "kind": "trade", **t})
     for t in trades_ap:
         feed.append({"source": "alpaca", "kind": "trade", **t})
+    for t in trades_s15:
+        feed.append({"source": "alpaca_scalp15", "kind": "trade", **t})
     for s in skips_bn:
         feed.append({"source": "binance", "kind": "skip", **s})
     for s in skips_ap:
@@ -614,6 +681,12 @@ def activity(vibe: Path, alpaca: Path, limit: int = 40) -> dict:
             v = row.get(k)
             if isinstance(v, (int, float)):
                 return float(v)
+            if isinstance(v, str) and v:
+                try:
+                    s = v.replace("Z", "+00:00")
+                    return datetime.fromisoformat(s).timestamp()
+                except Exception:
+                    pass
         return 0.0
 
     feed.sort(key=_ts, reverse=True)
@@ -621,6 +694,7 @@ def activity(vibe: Path, alpaca: Path, limit: int = 40) -> dict:
         "cycles": cycles,
         "trades_binance": list(reversed(trades_bn)),
         "trades_alpaca": list(reversed(trades_ap)),
+        "trades_scalp15": list(reversed(trades_s15)),
         "skips_binance": list(reversed(skips_bn)),
         "feed": feed[:limit],
     }
@@ -723,11 +797,15 @@ def digest_text(vibe: Path, alpaca: Path) -> str:
                 lines.append(f"  - {L['asset']}: ${L['usd']}")
         else:
             lines.append("  - (none)")
+        brief_s15 = (briefs.get("alpaca_scalp15") or {}).get("summary") or ""
+        if brief_s15:
+            lines += ["", f"Brief: {brief_s15}"]
 
     act = activity(vibe, alpaca, limit=8)
     wl = win_loss_table(vibe, alpaca)
     bn_wl = wl.get("binance") or {}
     ap_wl = wl.get("alpaca") or {}
+    s15_wl = wl.get("alpaca_scalp15") or {}
     lines += [
         "",
         "## Wins / Losses",
@@ -740,6 +818,11 @@ def digest_text(vibe: Path, alpaca: Path) -> str:
             f"- Alpaca: {ap_wl.get('wins')}W / {ap_wl.get('losses')}L"
             f" (flat {ap_wl.get('flat')}) · winrate {ap_wl.get('win_rate')}%"
             f" · hoy {ap_wl.get('wins_today')}W/{ap_wl.get('losses_today')}L"
+        ),
+        (
+            f"- scalp15: {s15_wl.get('wins')}W / {s15_wl.get('losses')}L"
+            f" (flat {s15_wl.get('flat')}) · winrate {s15_wl.get('win_rate')}%"
+            f" · hoy {s15_wl.get('wins_today')}W/{s15_wl.get('losses_today')}L"
         ),
         "",
         "## Cierres recientes Binance",
@@ -758,6 +841,14 @@ def digest_text(vibe: Path, alpaca: Path) -> str:
             f"{_fmt_pnl_pct_display(r)} · {str(r.get('reason') or '')[:70]}"
         )
     if not ap_wl.get("recent"):
+        lines.append("- (ninguno)")
+    lines += ["", "## Cierres recientes scalp15"]
+    for r in list(reversed(scalp15_closes()[-8:])):
+        lines.append(
+            f"- {r.get('symbol')} {r.get('result')} "
+            f"{_fmt_pnl_pct_display(r)} · {str(r.get('reason') or '')[:70]}"
+        )
+    if not s15_wl.get("recent"):
         lines.append("- (ninguno)")
     lines += ["", "## Recent activity"]
     for row in act.get("feed") or []:
@@ -800,11 +891,13 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
     """Rich brief for Open WebUI: enough trades/W-L to propose without asking the user."""
     bn = binance_snapshot(vibe)
     ap = alpaca_snapshot(alpaca)
+    s15 = alpaca_scalp15_snapshot(_scalp15_home())
     briefs = strategy_briefs()
     wl = win_loss_table(vibe, alpaca)
     act = activity(vibe, alpaca, limit=60)
     bn_closes = list(reversed(binance_closes(vibe, 200)[-15:]))
     ap_closes = list(reversed(alpaca_closes(alpaca)[-15:]))
+    s15_closes = list(reversed(scalp15_closes()[-15:]))
     feats = bn.get("features") or {}
 
     lines = [
@@ -819,6 +912,8 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
         lines.append("- Binance: archivo HALT presente")
     if ap.get("halt"):
         lines.append("- Alpaca: archivo HALT presente")
+    if s15.get("halt"):
+        lines.append("- Alpaca scalp15: archivo HALT presente")
     day_pnl = float(bn.get("day_pnl_pct") or 0)
     eq_bn = float(bn.get("equity") or 0)
     reason = str(bn.get("reason") or "")
@@ -898,8 +993,27 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
     else:
         lines.append("  - (none)")
 
+    lines += [
+        "",
+        "## Alpaca scalp15 live (cuenta paper aparte · 15m momentum)",
+        f"- strategy={s15.get('strategy')} regime={s15.get('regime')} halt={s15.get('halt')} present={s15.get('present')}",
+        f"- equity=${s15.get('equity')} day_pnl={s15.get('day_pnl_pct')}% buys_today={s15.get('buys_today')} "
+        f"trades={s15.get('trades_done')} last={s15.get('last_symbol')}",
+        f"- brief: {(briefs.get('alpaca_scalp15') or {}).get('summary') or '—'}",
+        "- open_legs:",
+    ]
+    if s15.get("legs"):
+        for L in s15["legs"]:
+            lines.append(
+                f"  - {L.get('asset')} ${L.get('usd')} qty={L.get('qty')} entry={L.get('entry')} "
+                f"pnl={L.get('pnl_pct')}"
+            )
+    else:
+        lines.append("  - (none)")
+
     bn_wl = wl.get("binance") or {}
     ap_wl = wl.get("alpaca") or {}
+    s15_wl = wl.get("alpaca_scalp15") or {}
     lines += [
         "",
         f"## Wins/Losses (día CDMX {wl.get('today')})",
@@ -912,6 +1026,11 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
             f"- Alpaca: {ap_wl.get('wins')}W/{ap_wl.get('losses')}L flat={ap_wl.get('flat')} "
             f"winrate={ap_wl.get('win_rate')}% · hoy {ap_wl.get('wins_today')}W/{ap_wl.get('losses_today')}L "
             f"closed={ap_wl.get('closed')}"
+        ),
+        (
+            f"- scalp15: {s15_wl.get('wins')}W/{s15_wl.get('losses')}L flat={s15_wl.get('flat')} "
+            f"winrate={s15_wl.get('win_rate')}% · hoy {s15_wl.get('wins_today')}W/{s15_wl.get('losses_today')}L "
+            f"closed={s15_wl.get('closed')}"
         ),
         "",
         "## Últimos cierres Binance (sells con result)",
@@ -930,6 +1049,17 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
         for r in ap_closes:
             lines.append(
                 f"- {r.get('symbol')}[{r.get('sleeve')}] {r.get('result')} "
+                f"pnl={_fmt_pnl_pct_display(r)} kind={r.get('kind')} "
+                f"reason={str(r.get('reason') or '')[:80]} day={r.get('day')}"
+            )
+    else:
+        lines.append("- (sin exits)")
+
+    lines += ["", "## Últimos cierres scalp15 (exits)"]
+    if s15_closes:
+        for r in s15_closes:
+            lines.append(
+                f"- {r.get('symbol')} {r.get('result')} "
                 f"pnl={_fmt_pnl_pct_display(r)} kind={r.get('kind')} "
                 f"reason={str(r.get('reason') or '')[:80]} day={r.get('day')}"
             )

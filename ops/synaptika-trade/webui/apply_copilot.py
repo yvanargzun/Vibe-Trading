@@ -12,10 +12,11 @@ from pathlib import Path
 DB = os.environ.get("WEBUI_DB", "/app/backend/data/webui.db")
 PROMPT_PATH = Path(os.environ.get("SYSTEM_PROMPT_FILE", "/srv/webui/SYSTEM_PROMPT.md"))
 FREE_PATH = Path(os.environ.get("FREE_MODELS_FILE", "/srv/webui/free_models.json"))
-DEFAULT_BASE = os.environ.get("DEFAULT_MODELS", "inclusionai/ling-3.0-flash:free")
+DEFAULT_BASE = os.environ.get("DEFAULT_MODELS", "synaptika-auto")
 COPILOT_ID = "synaptika-copiloto"
 OLLAMA_COPILOT_ID = "synaptika-ollama"
 OLLAMA_DEFAULT_BASE = os.environ.get("OLLAMA_DEFAULT_MODEL", "deepseek-v4-flash")
+PROXY_MODEL = os.environ.get("LLM_PROXY_MODEL", "synaptika-auto")
 OPS_URL = os.environ.get("OPS_TOOL_URL", "http://ops:8787")
 OPS_OPENAPI_PATH = os.environ.get("OPS_TOOL_OPENAPI_PATH", "/ops/api/openapi.json")
 OPS_API_KEY = os.environ.get("OPS_API_KEY", "").strip()
@@ -97,7 +98,8 @@ def upsert_model(
         "system": prompt,
         # Digest arrives via global filter. Native tool-calling is required
         # for OpenAPI Tool Server (read + write Ops tools).
-        "stream_response": True,
+        # Non-stream: llm-proxy failover is reliable without SSE mid-flight drops.
+        "stream_response": False,
         "max_tokens": 4096,
         "temperature": 0.4,
         "function_calling": "native",
@@ -236,7 +238,9 @@ def main() -> int:
 
     prompt = load_prompt()
     free = load_free_models()
-    if DEFAULT_BASE not in free:
+    # Copiloto always routes through failover proxy model
+    copiloto_base = PROXY_MODEL if PROXY_MODEL else DEFAULT_BASE
+    if DEFAULT_BASE not in free and not str(DEFAULT_BASE).startswith("synaptika"):
         free = [DEFAULT_BASE] + free
     ollama = load_ollama_models()
     ollama_base = OLLAMA_DEFAULT_BASE if OLLAMA_DEFAULT_BASE in ollama else (
@@ -275,7 +279,7 @@ def main() -> int:
             "models.default_params",
             {
                 "system": prompt,
-                "stream_response": True,
+                "stream_response": False,
                 "max_tokens": 4096,
                 "temperature": 0.4,
                 "function_calling": "native",
@@ -287,7 +291,7 @@ def main() -> int:
             cur,
             model_id=COPILOT_ID,
             user_id=uid,
-            base_model_id=DEFAULT_BASE,
+            base_model_id=copiloto_base,
             name="Synaptika Copiloto",
             prompt=prompt,
         )
@@ -329,7 +333,7 @@ def main() -> int:
         con.close()
 
     print(
-        f"ok copiloto id={COPILOT_ID} base={DEFAULT_BASE} "
+        f"ok copiloto id={COPILOT_ID} base={copiloto_base} "
         f"ollama_copilot={OLLAMA_COPILOT_ID if ollama_base else 'off'} "
         f"base_ollama={ollama_base} free={len(free)} ollama={len(ollama)}"
     )

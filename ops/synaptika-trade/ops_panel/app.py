@@ -301,6 +301,10 @@ def api_equity():
         out["binance"] = botdata.equity_series(VIBE)
     if venue in ("alpaca", "all"):
         out["alpaca"] = botdata.equity_series(ALPACA)
+    if venue in ("alpaca_scalp15", "scalp15", "all"):
+        out["alpaca_scalp15"] = botdata.equity_series(
+            Path(os.environ.get("ALPACA_SCALP15_HOME", "/data/alpaca_scalp15"))
+        )
     out["ts"] = time.time()
     return jsonify(out)
 

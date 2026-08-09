@@ -16,6 +16,25 @@ services:
       - open-webui
       - ops
 
+  llm-proxy:
+    build: ./llm_proxy
+    restart: unless-stopped
+    environment:
+      - LLM_PROXY_MODEL=${LLM_PROXY_MODEL:-synaptika-auto}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
+      - OLLAMA_CLOUD_BASE_URL=${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}
+      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-deepseek-v4-flash}
+      # OpenRouter = last-resort (also accepts OPENAI_API_KEY OWUI naming)
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1}
+    ports:
+      - "127.0.0.1:4000:4000"
+
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     restart: unless-stopped
@@ -35,30 +54,34 @@ services:
       - WEBUI_SESSION_COOKIE_SAME_SITE=none
       - WEBUI_SESSION_COOKIE_SECURE=true
       - ENV=prod
-      # OpenRouter only — no local Ollama (avoids connection noise / hangs)
+      # Local Ollama API off; cloud + OpenRouter via llm-proxy failover
       - ENABLE_OLLAMA_API=false
       - ENABLE_EVALUATION_ARENA_MODELS=false
-      # Dual LLM: OpenRouter :free (0) + Ollama Cloud (1)
-      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_API_BASE_URLS=${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1};${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}
-      - OPENAI_API_KEYS=${OPENAI_API_KEY:-};${OLLAMA_API_KEY:-}
+      # Primary = failover proxy (Gemini→Ollama→OpenRouter). Manual picks still available.
+      - OPENAI_API_BASE_URL=http://llm-proxy:4000/v1
+      - OPENAI_API_KEY=synaptika-proxy
+      # Real OpenRouter key (from secrets) for manual model picker + apply scripts
+      - OPENAI_UPSTREAM_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_UPSTREAM_BASE_URL=${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_BASE_URLS=http://llm-proxy:4000/v1;${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1};${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}
+      - OPENAI_API_KEYS=synaptika-proxy;${OPENAI_API_KEY:-};${OLLAMA_API_KEY:-}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
       - OLLAMA_CLOUD_BASE_URL=${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}
       - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-deepseek-v4-flash}
+      - LLM_PROXY_MODEL=${LLM_PROXY_MODEL:-synaptika-auto}
+      - LLM_PROXY_BASE_URL=http://llm-proxy:4000/v1
       - OPS_API_KEY=${OPS_API_KEY:-}
       - OPS_TOOL_URL=http://ops:8787
       - OPS_TOOL_OPENAPI_PATH=/ops/api/openapi.json
-      # Seed defaults; apply_free_models.py + apply_copilot.py refresh DB
-      - DEFAULT_MODELS=inclusionai/ling-3.0-flash:free
-      - DEFAULT_MODEL_PARAMS={"stream_response":true,"max_tokens":4096,"temperature":0.4,"function_calling":"native"}
-      # Persist each chat turn promptly in Open WebUI DB
+      # Copiloto default hits proxy auto model
+      - DEFAULT_MODELS=${LLM_PROXY_MODEL:-synaptika-auto}
+      - DEFAULT_MODEL_PARAMS={"stream_response":false,"max_tokens":4096,"temperature":0.4,"function_calling":"native"}
       - ENABLE_REALTIME_CHAT_SAVE=true
       - CHAT_HISTORY_DIR=/data/chat_history
     volumes:
       - open_webui:/app/backend/data
       - ./chat_history:/data/chat_history
-      # Brand assets copied at runtime (OWUI tries to write favicon/splash)
       - ./brand/logo-icon.png:/brand/logo-icon.png:ro
       - ./brand/logo-wordmark.png:/brand/logo-wordmark.png:ro
       - ./webui/free_models.json:/srv/webui/free_models.json:ro
@@ -67,17 +90,11 @@ services:
       - ./webui/apply_free_models.py:/srv/webui/apply_free_models.py:ro
       - ./webui/apply_copilot.py:/srv/webui/apply_copilot.py:ro
       - ./webui/export_chat_history.py:/srv/webui/export_chat_history.py:ro
-    entrypoint:
-      - /bin/bash
-      - -lc
-      - |
-        cp -f /brand/logo-icon.png /app/backend/open_webui/static/favicon.png 2>/dev/null || true
-        cp -f /brand/logo-wordmark.png /app/backend/open_webui/static/splash.png 2>/dev/null || true
-        exec bash start.sh
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - ops
+      - llm-proxy
 
   ops:
     build: ./ops_panel

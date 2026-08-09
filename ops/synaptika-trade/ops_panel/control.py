@@ -27,7 +27,7 @@ ALPACA_MODES = frozenset(
         "rotation",
     }
 )
-NOTIFY_MODES = frozenset({"vibe", "scalper", "fb", "all"})
+NOTIFY_MODES = frozenset({"vibe", "scalp15", "scalper", "fb", "all"})
 KNOB_KEYS = frozenset(
     {
         "ORDER_USD",
@@ -445,8 +445,10 @@ def set_notify_filter(*, vibe: Path, mode: str, confirm: bool = False) -> dict[s
     mode = (mode or "").lower().strip()
     if mode == "both":
         mode = "all"
+    if mode == "scalper":
+        mode = "scalp15"
     if mode not in NOTIFY_MODES:
-        return {"ok": False, "error": "bad_mode", "allowed": sorted(NOTIFY_MODES)}
+        return {"ok": False, "error": "bad_mode", "allowed": sorted(NOTIFY_MODES - {"scalper"})}
     path = vibe / "telegram_notify_prefs.json"
     doc = {"mode": mode, "sales_test": False, "updated_ts": time.time(), "by": "ops_copilot"}
     _write_json(path, doc)

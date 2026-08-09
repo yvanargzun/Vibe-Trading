@@ -92,19 +92,22 @@
     "id": "scalp15-momentum",
     "title": "Alpaca paper · scalp15 (15m)",
     "prompt": "15m candle-close momentum",
-    "summary": "Cuenta paper aparte. Entradas solo en cierre de vela 15m: breakout+volumen+EMA+RSI, filtro BTC 1h. Clip $50, 2 legs, day halt −1.5%.",
-    "style": "Scalp intradía 15m · multi-asset · sin pelear con canonical_v2",
+    "summary": "Cuenta paper aparte (~$100). Modo AGGRESSIVE: clip ~38–48% equity, hasta 3 legs, score≥2.45, day-halt −4%. Alpaca crypto es spot 1x (sin leverage real); usa buying_power si > cash. Telegram: /scalp15.",
+    "style": "Scalp intradía 15m agresivo · growth-first · sin pelear con canonical_v2",
     "universe": ["BTC", "ETH", "SOL", "DOGE", "LINK", "AVAX", "LTC", "UNI", "AAVE", "XRP"],
     "knobs": {
-      "clip_usd": 50,
-      "tp_pct": 1.0,
-      "sl_pct": 0.55,
-      "trail": "+0.6% / −0.3%",
-      "time_stop": "45m si PnL < +0.4%",
-      "max_legs": 2,
-      "max_buys_day": 8,
-      "day_loss_halt_pct": -1.5,
-      "score_min": 3.2
+      "clip_equity_pct": "38% (48% hot score≥4)",
+      "clip_floor_usd": 35,
+      "tp_pct": 1.5,
+      "sl_pct": 0.8,
+      "trail": "+0.8% / −0.4%",
+      "time_stop": "60m si PnL < +0.3%",
+      "max_legs": 3,
+      "max_buys_day": 16,
+      "day_loss_halt_pct": -4.0,
+      "score_min": 2.45,
+      "exposure_pct": 95,
+      "leverage": "spot 1x; BP si disponible"
     }
   }
 }
