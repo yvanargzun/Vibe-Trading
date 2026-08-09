@@ -4,7 +4,7 @@
 set -eu
 DEST=/root/.vibe-trading
 mkdir -p "$DEST"
-FILES="telegram_control_bot.py telegram_notify_prefs.py telegram_dynamic_monitor.py telegram_monitor_loop.py vibe_autotrade_loop.py equity_chart.py dynamic_goals.py market_orchestrator.py trade_events.py binance_wallets.py v6_config.py v6_trace.py PROMPT_V6.md"
+FILES="telegram_control_bot.py telegram_notify_prefs.py telegram_dynamic_monitor.py telegram_monitor_loop.py vibe_autotrade_loop.py equity_chart.py dynamic_goals.py market_orchestrator.py trade_events.py binance_wallets.py v6_config.py v6_trace.py strategy_feedback.py adaptive_tuner.py PROMPT_V6.md"
 for f in $FILES; do
   if [ -f "/tmp/$f" ]; then
     sed -i 's/\r$//' "/tmp/$f" || true
@@ -20,7 +20,10 @@ python3 -m py_compile \
   "$DEST/v6_trace.py" \
   "$DEST/market_orchestrator.py" \
   "$DEST/binance_wallets.py" \
-  "$DEST/dynamic_goals.py"
+  "$DEST/dynamic_goals.py" \
+  "$DEST/strategy_feedback.py" \
+  "$DEST/adaptive_tuner.py" \
+  "$DEST/trade_events.py"
 
 # Remove ETH scalper permanently — v6 owns the full Spot book
 systemctl stop vibe-eth-scalp.service 2>/dev/null || true

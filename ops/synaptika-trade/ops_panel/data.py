@@ -131,6 +131,8 @@ def binance_snapshot(vibe: Path) -> dict:
             float(feats.get("equity_usable_gap") or max(0.0, eq - usable)), 2
         ),
         "mode": mode.get("mode") or "?",
+        "locked": bool(mode.get("locked")),
+        "locked_by": mode.get("locked_by"),
         "reason": str(mode.get("reason") or "")[:240],
         "since_ts": mode.get("since_ts"),
         "flips_today": mode.get("flips_today"),
@@ -148,6 +150,7 @@ def binance_snapshot(vibe: Path) -> dict:
         "legs": legs,
         "halt": (vibe / "HALT").exists(),
         "strategy": st.get("strategy") or "smart-fast-v6",
+        "active": str(mode.get("mode") or "") in ("v6_primary", "defensive"),
         "features": {
             "usable_usdt": feats.get("usable_usdt"),
             "earn_locked_usd": feats.get("earn_locked_usd"),
@@ -496,22 +499,54 @@ def win_loss_table(vibe: Path, alpaca: Path) -> dict:
 
 
 def live_situations(vibe: Path) -> dict[str, Any]:
-    """Situations snapshot written by orchestrator + live fallback."""
+    """Situations snapshot written by orchestrator + live fallback.
+
+    Always overlay live mode/locked from strategy_mode.json so Ops stays
+    in sync when orch early-returns on sticky lock.
+    """
+    bn = binance_snapshot(vibe)
+    live_mode = str(bn.get("mode") or "")
+    live_reason = str(bn.get("reason") or "")
+    live_locked = bool(bn.get("locked"))
     snap = read_json(vibe / "strategy_situations.json")
     if snap.get("situations"):
+        situations = list(snap.get("situations") or [])
+        # Inject sticky-lock / active-mode banner if missing or stale
+        codes = {str(s.get("code") or "") for s in situations if isinstance(s, dict)}
+        if live_locked and "mode_locked" not in codes:
+            situations.insert(
+                0,
+                {
+                    "level": "ok",
+                    "code": "mode_locked",
+                    "text": (
+                        f"Modo forzado {live_mode or '?'} (locked"
+                        f"{(' por ' + str(bn.get('locked_by'))) if bn.get('locked_by') else ''})"
+                    ),
+                },
+            )
+        if live_mode in ("v6_primary", "defensive") and "mode_active" not in codes:
+            situations.insert(
+                0 if live_locked else 0,
+                {
+                    "level": "ok",
+                    "code": "mode_active",
+                    "text": f"Binance activo · strategy={bn.get('strategy')} · mode={live_mode}",
+                },
+            )
         return {
             "ts": snap.get("ts"),
             "ts_cdmx": snap.get("ts_cdmx"),
-            "mode": snap.get("mode"),
-            "reason": snap.get("reason"),
-            "situations": list(snap.get("situations") or []),
-            "source": "strategy_situations.json",
+            "mode": live_mode or snap.get("mode"),
+            "reason": live_reason or snap.get("reason"),
+            "locked": live_locked,
+            "situations": situations,
+            "source": "strategy_situations.json+live_overlay",
         }
     # Fallback derive from mode + state
-    bn = binance_snapshot(vibe)
     feats = dict(bn.get("features") or {})
-    reason = str(bn.get("reason") or "")
-    mode = str(bn.get("mode") or "")
+    reason = live_reason
+    mode = live_mode
     situations: list[dict[str, str]] = []
 
     def add(level: str, code: str, text: str) -> None:
@@ -520,6 +555,19 @@ def live_situations(vibe: Path) -> dict[str, Any]:
     eq = float(bn.get("equity") or 0)
     usdt = float(bn.get("usable") or 0)
     earn = float(bn.get("earn_locked") or feats.get("earn_locked_usd") or 0)
+    if live_locked:
+        add(
+            "ok",
+            "mode_locked",
+            f"Modo forzado {mode or '?'} (locked"
+            f"{(' por ' + str(bn.get('locked_by'))) if bn.get('locked_by') else ''})",
+        )
+    if mode in ("v6_primary", "defensive"):
+        add(
+            "ok",
+            "mode_active",
+            f"Binance activo · strategy={bn.get('strategy')} · mode={mode}",
+        )
     if "need_recharge" in reason:
         grace = (
             "grace 2 clips"
@@ -556,6 +604,7 @@ def live_situations(vibe: Path) -> dict[str, Any]:
         "ts_cdmx": None,
         "mode": mode,
         "reason": reason,
+        "locked": live_locked,
         "situations": situations,
         "source": "derived",
     }
@@ -589,6 +638,44 @@ def feedback_history(vibe: Path, limit: int = 40) -> list[dict]:
         )
     return list(reversed(out))
 
+
+def learning_history(vibe: Path, limit: int = 40) -> list[dict]:
+    """Adaptive tuner journal (knob patches from feedback)."""
+    rows = read_jsonl_tail(vibe / "learning_journal.jsonl", max(limit, 1))
+    out: list[dict] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        out.append(
+            {
+                "ts": r.get("ts"),
+                "ts_cdmx": r.get("ts_cdmx"),
+                "applied": bool(r.get("applied")),
+                "action": r.get("action"),
+                "symbol": r.get("symbol"),
+                "title": r.get("title"),
+                "reason": r.get("reason"),
+                "patch": r.get("patch") or {},
+                "before": r.get("before") or {},
+                "after": r.get("after") or {},
+                "note": r.get("note"),
+            }
+        )
+    return list(reversed(out))
+
+
+def knobs_overlay_snapshot(vibe: Path) -> dict:
+    doc = read_json(vibe / "v6_knobs_overlay.json")
+    st = read_json(vibe / "adaptive_tuner_state.json")
+    return {
+        "knobs": doc.get("knobs") or {},
+        "updated_ts": doc.get("updated_ts"),
+        "by": doc.get("by"),
+        "note": doc.get("note"),
+        "applies_today": st.get("applies_today"),
+        "applies_day": st.get("applies_day"),
+        "last_learn_ts": st.get("last_learn_ts"),
+    }
 
 
 def trade_ledger(vibe: Path, alpaca: Path, limit: int = 50) -> list[dict]:
@@ -946,6 +1033,16 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
             f"- Binance mode=standby · reason: {bn.get('reason') or '—'} · "
             f"usable=${bn.get('usable')} · flips_today={mode_doc.get('flips_today')}"
         )
+    if bn.get("locked"):
+        lines.append(
+            f"- Binance LOCKED en mode={bn.get('mode')} "
+            f"(by={bn.get('locked_by') or '—'}) · orquestador no auto-flip"
+        )
+    if str(bn.get("mode") or "") in ("v6_primary", "defensive"):
+        lines.append(
+            f"- Binance ESTRATEGIA ACTIVA: {bn.get('strategy')} · mode={bn.get('mode')} "
+            f"(compras permitidas sujeto a score/caps)"
+        )
     if "fee_budget_soft" in reason or "grace_" in reason or "need_recharge" in reason:
         lines.append(f"- Binance orch soft/recharge: {reason}")
     if float(bn.get("usable") or 0) < 1:
@@ -956,11 +1053,16 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
     lines += [
         "",
         "## Binance live",
-        f"- strategy={bn.get('strategy')} mode={bn.get('mode')} regime={bn.get('regime')} halt={bn.get('halt')}",
+        f"- strategy={bn.get('strategy')} mode={bn.get('mode')} "
+        f"locked={bn.get('locked')} locked_by={bn.get('locked_by')} "
+        f"active={bn.get('active')} regime={bn.get('regime')} halt={bn.get('halt')}",
         f"- equity=${bn.get('equity')} usable=${bn.get('usable')} earn=${bn.get('earn_locked') or 0} "
         f"gap=${bn.get('equity_usable_gap') or 0} day_pnl={bn.get('day_pnl_pct')}% (${bn.get('day_pnl')})",
         f"- week_pnl={bn.get('week_pnl_pct')}% · buys_today={bn.get('buys_today')} trades_done={bn.get('trades_done')} last={bn.get('last_symbol')}",
         f"- orch_reason: {bn.get('reason')}",
+        f"- adaptive_knobs: {knobs_overlay_snapshot(vibe).get('by')} "
+        f"applies_today={knobs_overlay_snapshot(vibe).get('applies_today')} "
+        f"note={knobs_overlay_snapshot(vibe).get('note')}",
         f"- features: btc_regime={feats.get('btc_regime')} btc_1h={feats.get('btc_chg1h')} "
         f"btc_24={feats.get('btc_chg24')} loss_streak={feats.get('loss_streak')} "
         f"notional_frac={feats.get('notional_frac')} fee_limit={feats.get('fee_limit')} "
@@ -975,6 +1077,25 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
             )
     else:
         lines.append("  - (none)")
+
+    lines += ["", "## Aprendizaje auto (adaptive_tuner)"]
+    kov = knobs_overlay_snapshot(vibe)
+    learn = learning_history(vibe, limit=5)
+    if kov.get("knobs"):
+        kv = ", ".join(f"{k}={v}" for k, v in list((kov.get("knobs") or {}).items())[:8])
+        lines.append(
+            f"- overlay by={kov.get('by')} applies_today={kov.get('applies_today')} · {kv}"
+        )
+    if learn:
+        for L in learn[:5]:
+            applied = "APLICADO" if L.get("applied") else "log"
+            patch = L.get("patch") or {}
+            ptxt = ",".join(f"{k}={v}" for k, v in list(patch.items())[:4]) or "—"
+            lines.append(
+                f"- [{applied}] {L.get('symbol')} {L.get('action')}: {L.get('reason')} · {ptxt}"
+            )
+    else:
+        lines.append("- (sin entradas de learning_journal aún)")
 
     lines += [
         "",
@@ -1150,6 +1271,9 @@ def full_status(vibe: Path, alpaca: Path) -> dict[str, Any]:
             "briefs": briefs,
             "live": {
                 "binance_mode": bn.get("mode"),
+                "binance_locked": bn.get("locked"),
+                "binance_strategy": bn.get("strategy"),
+                "binance_active": bn.get("active"),
                 "alpaca_mode": ap.get("mode"),
                 "alpaca_scalp15": s15.get("mode"),
             },
@@ -1158,6 +1282,8 @@ def full_status(vibe: Path, alpaca: Path) -> dict[str, Any]:
         "win_loss": win_loss_table(vibe, alpaca),
         "situations": live_situations(vibe),
         "feedback": feedback_history(vibe, limit=25),
+        "learning": learning_history(vibe, limit=25),
+        "knobs_overlay": knobs_overlay_snapshot(vibe),
         "positions": open_positions_table(vibe, alpaca),
         "trades": trade_ledger(vibe, alpaca, limit=40),
         "equity": {

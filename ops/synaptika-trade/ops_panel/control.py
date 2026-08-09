@@ -349,6 +349,104 @@ def set_halt(
     return {"ok": True, "halt": halt, "venue": venue, "touched": touched, "reason": reason}
 
 
+def _load_dotenv(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+def _telegram_mode_notice(
+    vibe: Path,
+    *,
+    venue: str,
+    mode: str,
+    locked: bool,
+    reason: str,
+) -> None:
+    """Best-effort Telegram ping when Ops forces a mode (Hermes/Vibe chat)."""
+    try:
+        import urllib.parse
+        import urllib.request
+
+        env = _load_dotenv(vibe / ".env")
+        token = env.get("TELEGRAM_BOT_TOKEN") or ""
+        chat = env.get("TELEGRAM_CHAT_ID") or ""
+        if not token or not chat:
+            return
+        lock_txt = "LOCKED" if locked else "unlocked"
+        text = (
+            f"[Ops] {venue} modo → {mode} ({lock_txt})\n"
+            f"Por qué: {(reason or 'ops_set_mode')[:180]}\n"
+            f"Visible en Ops + digests Telegram. Hermes: vibe-status"
+        )
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = urllib.parse.urlencode(
+            {"chat_id": chat, "text": text[:3500]}
+        ).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            resp.read()
+    except Exception:
+        pass
+
+
+def _persist_binance_situations_from_mode(vibe: Path, doc: dict[str, Any]) -> None:
+    """Keep Ops situations file aligned after Ops set_mode (incl. locked)."""
+    try:
+        mode = str(doc.get("mode") or "")
+        reason = str(doc.get("reason") or "")
+        locked = bool(doc.get("locked"))
+        feats = doc.get("features") or {}
+        sits: list[dict[str, str]] = []
+        if locked:
+            sits.append(
+                {
+                    "level": "ok",
+                    "code": "mode_locked",
+                    "text": (
+                        f"Modo forzado {mode} (locked"
+                        f"{(' por ' + str(doc.get('locked_by'))) if doc.get('locked_by') else ''})"
+                    ),
+                }
+            )
+        if mode in ("v6_primary", "defensive"):
+            sits.append(
+                {
+                    "level": "ok",
+                    "code": "mode_active",
+                    "text": f"Binance activo · mode={mode}",
+                }
+            )
+        if "need_recharge" in reason or "day_edge" in reason:
+            sits.append({"level": "warn", "code": "orch_reason", "text": reason[:160]})
+        if not sits:
+            sits.append({"level": "ok", "code": "clear", "text": "Sin flags especiales"})
+        payload = {
+            "ts": time.time(),
+            "mode": mode,
+            "reason": reason,
+            "locked": locked,
+            "situations": sits,
+            "source": "ops_set_mode",
+        }
+        # lightly include equity if present
+        if feats.get("equity") is not None:
+            payload["equity"] = feats.get("equity")
+        _write_json(vibe / "strategy_situations.json", payload)
+    except Exception:
+        pass
+
+
 def set_mode(
     vibe: Path,
     alpaca: Path,
@@ -381,6 +479,14 @@ def set_mode(
             }
         )
         _write_json(path, doc)
+        _persist_binance_situations_from_mode(vibe, doc)
+        _telegram_mode_notice(
+            vibe,
+            venue="Binance",
+            mode=mode,
+            locked=bool(locked),
+            reason=str(doc.get("reason") or ""),
+        )
         return {"ok": True, "venue": venue, "mode": mode, "locked": locked, "path": str(path)}
     if venue == "alpaca":
         if mode not in ALPACA_MODES:

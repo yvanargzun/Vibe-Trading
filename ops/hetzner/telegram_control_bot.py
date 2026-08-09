@@ -209,6 +209,21 @@ def build_vibe_digest() -> str:
         f"- Cambio vs punto anterior: {sign}{chg:.2f}%",
         f"- Cambio del dia (mark vs apertura): {book_sign}${book_pnl:.2f} ({book_pct_sign}{book_pct:.2f}%)",
     ]
+    # Strategy mode (Ops / Hermes visibility)
+    try:
+        mode_doc = _read_json(HOME / "strategy_mode.json")
+        m = str(mode_doc.get("mode") or "?")
+        locked = bool(mode_doc.get("locked"))
+        reason = str(mode_doc.get("reason") or "")[:120]
+        lock_s = "LOCKED" if locked else "auto"
+        lines += [
+            "",
+            "Estrategia",
+            f"- Modo: {m} · {lock_s} · strategy=smart-fast-v6",
+            f"- Motivo: {reason or '—'}",
+        ]
+    except Exception:
+        pass
     if daily_target > 0 or weekly_target > 0:
         lines += ["", "Metas"]
         if daily_target > 0:

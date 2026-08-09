@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>{{ brand }} · Ops</title>
   <link rel="icon" href="/static/brand/logo-icon.png"/>
-  <link rel="stylesheet" href="/static/ops/ops.css?v=9"/>
+  <link rel="stylesheet" href="/static/ops/ops.css?v=10"/>
   <meta http-equiv="refresh" content="30"/>
 </head>
 <body>
@@ -45,18 +45,20 @@
 
     <div class="grid two">
       <section class="card">
-        <h2>Binance <span class="chip">{{ bn.mode }}</span>
+        <h2>Binance <span class="chip {% if bn.active %}ok{% endif %}">{{ bn.mode }}</span>
+          {% if bn.locked %}<span class="chip warn">LOCKED</span>{% endif %}
           {% if bn.halt %}<span class="chip warn">HALT</span>{% endif %}
         </h2>
         <div class="metric">${{ '%.2f'|format(bn.equity or 0) }}</div>
         <div class="meta">
-          usable ${{ '%.2f'|format(bn.usable or 0) }}
+          {{ bn.strategy or 'smart-fast-v6' }}
+          · usable ${{ '%.2f'|format(bn.usable or 0) }}
           · day {{ '%+.2f'|format(bn.day_pnl_pct or 0) }}% (${{ '%.2f'|format(bn.day_pnl or 0) }})
           · {{ bn.regime }}
           · buys {{ bn.buys_today if bn.buys_today is not none else '—' }}
           · legs {{ bn.legs|length }}
         </div>
-        <p class="meta reason">{{ bn.reason }}</p>
+        <p class="meta reason">{{ bn.reason }}{% if bn.locked_by %} · by {{ bn.locked_by }}{% endif %}</p>
       </section>
 
       <section class="card">
@@ -207,6 +209,8 @@
         Lo que el orquestador ve ahora
         {% if sits.ts_cdmx %} · actualizado {{ sits.ts_cdmx }} CDMX{% elif sits.ts %} · {{ sits.ts|ts_cdmx }}{% endif %}
         · mode <strong>{{ sits.mode or bn.mode }}</strong>
+        {% if bn.locked or sits.locked %}<span class="chip warn">LOCKED</span>{% endif %}
+        {% if bn.active %}<span class="chip ok">ACTIVO</span>{% endif %}
       </p>
       <ul class="situations">
         {% for s in sits.situations or [] %}
@@ -223,7 +227,7 @@
     <section class="card" style="margin-top:1rem">
       <h2>Retroalimentación / recomendaciones</h2>
       <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
-        Historial post-cierre (solo si hace falta cambiar o confirmar estrategia) · también por Telegram
+        Cada cierre genera retro → el tuner aplica un ajuste o decay (auto)
       </p>
       <div class="table-wrap">
         <table class="feed">
@@ -256,7 +260,58 @@
                 </td>
               </tr>
             {% else %}
-              <tr><td colspan="5">Aún no hay recomendaciones. Aparecen al cerrar un trade cuando el sistema detecta algo útil que decir.</td></tr>
+              <tr><td colspan="5">Aún no hay retro. Aparece en cada cierre del bot Binance.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:1rem">
+      <h2>Autoaprendizaje</h2>
+      {% set kov = status.knobs_overlay or {} %}
+      <p class="meta" style="margin-top:-.35rem;margin-bottom:.75rem">
+        Overlay knobs
+        {% if kov.by %}<span class="chip">{{ kov.by }}</span>{% endif %}
+        · applies hoy {{ kov.applies_today if kov.applies_today is not none else 0 }}
+        {% if kov.note %} · {{ kov.note }}{% endif %}
+      </p>
+      {% if kov.knobs %}
+      <ul class="knob-list">
+        {% for k,v in kov.knobs.items() %}
+          <li><strong>{{ k }}</strong>: {{ v }}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="meta">Sin overlay aún (baseline canónico).</p>
+      {% endif %}
+      <div class="table-wrap" style="margin-top:.75rem">
+        <table class="feed">
+          <thead>
+            <tr>
+              <th>Cuándo</th>
+              <th>Estado</th>
+              <th>Origen</th>
+              <th>Cambio</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in status.learning or [] %}
+              <tr>
+                <td class="num">{{ r.ts_cdmx or (r.ts|ts_cdmx) }}</td>
+                <td><span class="chip {% if r.applied %}ok{% else %}warn{% endif %}">{{ 'APLICADO' if r.applied else 'log' }}</span></td>
+                <td>{{ r.symbol or '—' }} · {{ r.action or '—' }}</td>
+                <td>
+                  <strong>{{ r.reason or r.note or '—' }}</strong>
+                  {% if r.patch %}
+                  <div class="meta">
+                    {% for k,v in r.patch.items() %}{{ k }}={{ v }}{% if not loop.last %} · {% endif %}{% endfor %}
+                  </div>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4">Sin aprendizajes aún. Se activan al cerrar trades.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -396,10 +451,17 @@
         {% for key in ['binance','alpaca','alpaca_scalp15'] %}
           {% set brief = briefs.get(key) %}
           {% if brief %}
-          <div class="strategy-block">
-            <h3>{{ brief.title }}</h3>
+          {% set is_live = (key == 'binance' and bn.active) or (key == 'alpaca' and ap.mode and ap.mode != '?') %}
+          <div class="strategy-block{% if key == 'binance' and bn.active %} live{% endif %}">
+            <h3>{{ brief.title }}
+              {% if key == 'binance' and bn.active %}<span class="chip ok">EN VIVO · {{ bn.mode }}</span>{% endif %}
+              {% if key == 'binance' and bn.locked %}<span class="chip warn">LOCKED</span>{% endif %}
+            </h3>
             <p>{{ brief.summary }}</p>
             <p class="meta">{{ brief.style }}</p>
+            {% if key == 'binance' %}
+            <p class="meta">Live: strategy={{ bn.strategy }} · mode={{ bn.mode }} · locked={{ bn.locked }}</p>
+            {% endif %}
             <ul class="knob-list">
               {% for k,v in brief.knobs.items() %}
                 <li><strong>{{ k }}</strong>: {{ v }}</li>

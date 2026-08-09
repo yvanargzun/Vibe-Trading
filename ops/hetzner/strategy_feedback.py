@@ -113,6 +113,12 @@ def build_situations(
         add("warn", "standby", f"Standby: {reason[:140]}")
     if mode == "recap" and "need_recharge" not in reason:
         add("info", "recap", f"Recap: {reason[:140]}")
+    if mode == "v6_primary":
+        add("ok", "mode_active", "Binance v6_primary activo · compras sujetas a score/caps")
+    if mode == "defensive":
+        add("ok", "mode_active", "Binance defensive activo · clips prudentes")
+    if "locked:" in reason:
+        add("ok", "mode_locked", f"Mode sticky/lock: {reason[:140]}")
     thr = feats.get("day_loss_thr")
     day_pnl = feats.get("day_pnl_pct")
     try:
@@ -231,7 +237,13 @@ def analyze_close(
             )
             priority = "low"
         else:
-            return None
+            action = "mantener"
+            title = "Micro-loss menor — mantener envelope"
+            detail = (
+                f"Cierre leve ({pnl*100:.2f}%) sin fee pressure fuerte. "
+                "El tuner aplica decay suave; no subir clip."
+            )
+            priority = "low"
     elif res == "win" and pnl is not None and pnl >= 0.015:
         action = "mantener"
         title = "Win sólido — mantener estrategia"
@@ -251,7 +263,12 @@ def analyze_close(
             )
             priority = "med"
         else:
-            return None
+            action = "mantener"
+            title = "Win pequeño — mantener"
+            detail = (
+                f"Win +{pnl*100:.2f}%. Conserva knobs; tuner aplicará decay suave hacia baseline."
+            )
+            priority = "low"
     elif res in ("flat", "unknown"):
         if usd_v >= 5 and (kind_s.startswith("fund") or "sync" in kind_s):
             action = "ajustar"
@@ -262,9 +279,15 @@ def analyze_close(
             )
             priority = "low"
         else:
-            return None
+            action = "mantener"
+            title = "Cierre flat/sync — sin cambio agresivo"
+            detail = (
+                f"{symbol} flat/unknown ({kind or reason or 'n/a'}). "
+                "Tuner registra aprendizaje con ajuste mínimo."
+            )
+            priority = "low"
     else:
-        # Win mid-range or unclassified: silence unless orchestrator flags
+        # Win mid-range or unclassified
         if "need_recharge" in orch_reason and res == "win":
             action = "ajustar"
             title = "Tras win: aún need_recharge"
@@ -274,7 +297,13 @@ def analyze_close(
             )
             priority = "med"
         else:
-            return None
+            action = "mantener"
+            title = "Cierre registrado — mantener con aprendizaje"
+            detail = (
+                f"{symbol} {res or 'n/a'} · {kind or reason or 'exit'}. "
+                "Cada cierre alimenta el tuner (ajuste o decay)."
+            )
+            priority = "low"
 
     now = time.time()
     row = {
@@ -365,4 +394,11 @@ def record_close_feedback(
     )
     if notify:
         notify_telegram(row)
+    # Self-learning: every feedback → knob patch (full-auto with clamps)
+    try:
+        import adaptive_tuner as at
+
+        at.learn_from_feedback(row)
+    except Exception as exc:  # noqa: BLE001
+        print(f"LEARN_FAIL {exc}", flush=True)
     return row

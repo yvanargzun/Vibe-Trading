@@ -365,6 +365,24 @@ def api_feedback():
     return jsonify({"ts": time.time(), "count": len(rows), "feedback": rows})
 
 
+@app.get("/ops/api/learning")
+@api_auth_required
+def api_learning():
+    try:
+        limit = int(request.args.get("limit") or 40)
+    except ValueError:
+        limit = 40
+    rows = botdata.learning_history(VIBE, limit=max(1, min(limit, 200)))
+    return jsonify(
+        {
+            "ts": time.time(),
+            "count": len(rows),
+            "learning": rows,
+            "overlay": botdata.knobs_overlay_snapshot(VIBE),
+        }
+    )
+
+
 @app.get("/ops/api/positions")
 @api_auth_required
 def api_positions():

@@ -425,13 +425,75 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         cur = str(doc.get("mode") or "defensive")
         doc["features"] = features
         doc["updated_ts"] = now
-        doc["reason"] = f"locked:{doc.get('reason') or cur}"
+        # preserve user reason under locked: prefix once
+        prev_r = str(doc.get("reason") or cur)
+        if not prev_r.startswith("locked:"):
+            doc["reason"] = f"locked:{prev_r}"
         _save_mode(doc)
         print(
             f"ORCH mode={cur} want=locked held={ (now-float(doc.get('since_ts') or now))/60:.1f}m "
             f"flips={doc.get('flips_today')} reason={doc['reason'][:80]}",
             flush=True,
         )
+        # Still refresh Ops situations while locked
+        try:
+            import strategy_feedback as sf
+
+            st_doc = _load_json(AUTOTRADE_STATE)
+            st_buys = int(st_doc.get("buys_today") or 0)
+            open_legs = sum(
+                1
+                for _a, meta in (st_doc.get("positions") or {}).items()
+                if float((meta or {}).get("usd") or 0) >= 0.5
+            )
+            sits = sf.build_situations(
+                mode=cur,
+                reason=str(doc.get("reason") or ""),
+                features=features,
+                equity=eq,
+                usable=usable,
+                buys_today=st_buys,
+                open_legs=open_legs,
+                last_skip=None,
+            )
+            # sticky-lock banner first
+            sits.insert(
+                0,
+                {
+                    "level": "ok",
+                    "code": "mode_locked",
+                    "text": (
+                        f"Modo forzado {cur} (locked"
+                        f"{(' por ' + str(doc.get('locked_by'))) if doc.get('locked_by') else ''})"
+                    ),
+                },
+            )
+            if cur in ("v6_primary", "defensive"):
+                sits.insert(
+                    1,
+                    {
+                        "level": "ok",
+                        "code": "mode_active",
+                        "text": f"Binance activo · mode={cur}",
+                    },
+                )
+            sf.persist_situations(
+                sits,
+                extra={
+                    "mode": cur,
+                    "reason": doc.get("reason"),
+                    "locked": True,
+                    "equity": eq,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"SITUATIONS_FAIL locked {exc}", flush=True)
+        try:
+            import adaptive_tuner as at
+
+            at.maybe_tune()
+        except Exception as exc:  # noqa: BLE001
+            print(f"LEARN_TICK_FAIL {exc}", flush=True)
         return doc
 
     target, reason = propose_mode(features)
@@ -567,6 +629,13 @@ def evaluate_and_update(*, notify: bool = True) -> dict:
         )
     except Exception as exc:  # noqa: BLE001
         print(f"SITUATIONS_FAIL {exc}", flush=True)
+
+    try:
+        import adaptive_tuner as at
+
+        at.maybe_tune()
+    except Exception as exc:  # noqa: BLE001
+        print(f"LEARN_TICK_FAIL {exc}", flush=True)
 
     print(
         f"ORCH mode={doc['mode']} want={target} held={held/60:.1f}m "
