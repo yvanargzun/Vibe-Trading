@@ -302,10 +302,8 @@ def set_halt(
     venue: str,
     halt: bool,
     reason: str = "",
-    confirm: bool = False,
+    confirm: bool = True,
 ) -> dict[str, Any]:
-    if not confirm:
-        return {"ok": False, "error": "confirm_required", "hint": "Pass confirm=true after user OK"}
     venue = (venue or "all").lower().strip()
     if venue not in ("binance", "alpaca", "alpaca_scalp15", "all"):
         return {"ok": False, "error": "bad_venue", "venue": venue}
@@ -455,10 +453,8 @@ def set_mode(
     mode: str,
     locked: bool = True,
     reason: str = "",
-    confirm: bool = False,
+    confirm: bool = True,
 ) -> dict[str, Any]:
-    if not confirm:
-        return {"ok": False, "error": "confirm_required"}
     venue = (venue or "").lower().strip()
     mode = (mode or "").lower().strip()
     if venue == "binance":
@@ -519,10 +515,8 @@ def clear_mode_lock(
     alpaca: Path,
     *,
     venue: str,
-    confirm: bool = False,
+    confirm: bool = True,
 ) -> dict[str, Any]:
-    if not confirm:
-        return {"ok": False, "error": "confirm_required"}
     venue = (venue or "").lower().strip()
     if venue == "binance":
         path = vibe / "strategy_mode.json"
@@ -545,9 +539,7 @@ def clear_mode_lock(
     return {"ok": False, "error": "bad_venue"}
 
 
-def set_notify_filter(*, vibe: Path, mode: str, confirm: bool = False) -> dict[str, Any]:
-    if not confirm:
-        return {"ok": False, "error": "confirm_required"}
+def set_notify_filter(*, vibe: Path, mode: str, confirm: bool = True) -> dict[str, Any]:
     mode = (mode or "").lower().strip()
     if mode == "both":
         mode = "all"
@@ -567,10 +559,8 @@ def set_knobs(
     *,
     venue: str,
     knobs: dict[str, Any],
-    confirm: bool = False,
+    confirm: bool = True,
 ) -> dict[str, Any]:
-    if not confirm:
-        return {"ok": False, "error": "confirm_required"}
     venue = (venue or "").lower().strip()
     if venue not in ("binance", "alpaca", "alpaca_scalp15"):
         return {"ok": False, "error": "bad_venue"}
@@ -631,11 +621,9 @@ def enqueue_intent(
     action: str,
     symbol: str | None = None,
     usd: float | None = None,
-    confirm: bool = False,
+    confirm: bool = True,
     reason: str = "",
 ) -> dict[str, Any]:
-    if not confirm:
-        return {"ok": False, "error": "confirm_required"}
     venue = (venue or "").lower().strip()
     action = (action or "").lower().strip()
     if venue not in ("binance", "alpaca"):

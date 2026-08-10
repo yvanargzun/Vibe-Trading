@@ -42,8 +42,8 @@ SUGGESTIONS = [
         "content": "Analiza wins/losses de Binance y Alpaca (totales y hoy) y qué patrones ves en los últimos cierres.",
     },
     {
-        "title": ["Cambiar estrategia", "con confirmación"],
-        "content": "Revisa get_control_status y propone un cambio de modo o knobs. Pídeme confirmación explícita antes de llamar set_strategy_mode / set_strategy_knobs.",
+        "title": ["Cambiar estrategia", "ejecutar ya"],
+        "content": "Revisa get_control_status y aplica el cambio de modo o knobs que haga falta con las write tools (sin pedirme confirmación). Luego reporta el resultado real.",
     },
     {
         "title": ["Por qué standby", "Binance"],
@@ -105,7 +105,7 @@ def upsert_model(
         "function_calling": "native",
     }
     meta = {
-        "description": "Copiloto Synaptika Trade — bots VPS + control (modo/HALT/knobs/órdenes) con confirmación.",
+        "description": "Copiloto Synaptika Trade — bots VPS + control (modo/HALT/knobs/órdenes) sin pedir confirmación extra.",
         "filterIds": [FILTER_ID],
         # Open WebUI OpenAPI tool server id "0" (Synaptika Ops).
         "toolIds": ["server:0"],
@@ -260,7 +260,7 @@ def main() -> int:
                 "name": "Synaptika Ops",
                 "description": (
                     "API Ops: lectura + control (halt/mode/knobs/intents) para "
-                    "Binance y Alpaca paper. Write tools requieren confirm=true."
+                    "Binance y Alpaca paper. Write tools auto-confirman; ejecuta al pedir el usuario."
                 ),
             },
         }

@@ -37,7 +37,7 @@ def register(
             venue=str(b.get("venue") or "all"),
             halt=bool(b.get("halt", True)),
             reason=str(b.get("reason") or ""),
-            confirm=bool(b.get("confirm")),
+            confirm=True if "confirm" not in b else bool(b.get("confirm")),
         )
         audit("control_halt", json.dumps(res)[:400])
         return jsonify(res), (200 if res.get("ok") else 400)
@@ -53,7 +53,7 @@ def register(
             mode=str(b.get("mode") or ""),
             locked=bool(b.get("locked", True)),
             reason=str(b.get("reason") or ""),
-            confirm=bool(b.get("confirm")),
+            confirm=True if "confirm" not in b else bool(b.get("confirm")),
         )
         audit("control_mode", json.dumps(res)[:400])
         return jsonify(res), (200 if res.get("ok") else 400)
@@ -66,7 +66,7 @@ def register(
             vibe,
             alpaca,
             venue=str(b.get("venue") or ""),
-            confirm=bool(b.get("confirm")),
+            confirm=True if "confirm" not in b else bool(b.get("confirm")),
         )
         audit("control_unlock", json.dumps(res)[:400])
         return jsonify(res), (200 if res.get("ok") else 400)
@@ -78,7 +78,7 @@ def register(
         res = opsctl.set_notify_filter(
             vibe=vibe,
             mode=str(b.get("mode") or ""),
-            confirm=bool(b.get("confirm")),
+            confirm=True if "confirm" not in b else bool(b.get("confirm")),
         )
         audit("control_notify", json.dumps(res)[:400])
         return jsonify(res), (200 if res.get("ok") else 400)
@@ -92,7 +92,7 @@ def register(
             alpaca,
             venue=str(b.get("venue") or ""),
             knobs=dict(b.get("knobs") or {}),
-            confirm=bool(b.get("confirm")),
+            confirm=True if "confirm" not in b else bool(b.get("confirm")),
         )
         audit("control_knobs", json.dumps(res)[:400])
         return jsonify(res), (200 if res.get("ok") else 400)
@@ -108,7 +108,7 @@ def register(
             action=str(b.get("action") or ""),
             symbol=b.get("symbol"),
             usd=b.get("usd"),
-            confirm=bool(b.get("confirm")),
+            confirm=True if "confirm" not in b else bool(b.get("confirm")),
             reason=str(b.get("reason") or ""),
         )
         audit("control_intent", json.dumps(res)[:400])
@@ -117,8 +117,9 @@ def register(
 
 def openapi_write_paths() -> dict:
     confirm_note = (
-        "WRITE tool. Ask the user to confirm, then call with confirm=true. "
-        "Applies to Binance live Spot and Alpaca paper."
+        "WRITE tool. Ejecuta de inmediato cuando el usuario lo pida "
+        "(no pidas confirmación extra). confirm=true por defecto. "
+        "Aplica a Binance live Spot y Alpaca paper."
     )
     write_body = {
         "required": True,
