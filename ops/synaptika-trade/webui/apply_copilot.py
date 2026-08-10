@@ -42,8 +42,8 @@ SUGGESTIONS = [
         "content": "Analiza wins/losses de Binance y Alpaca (totales y hoy) y qué patrones ves en los últimos cierres.",
     },
     {
-        "title": ["Cambiar estrategia", "ejecutar ya"],
-        "content": "Revisa get_control_status y aplica el cambio de modo o knobs que haga falta con las write tools (sin pedirme confirmación). Luego reporta el resultado real.",
+        "title": ["Cambiar estrategia", "pedir confirmación"],
+        "content": "Revisa get_control_status, proponme el cambio de modo o knobs y pregunta confirmación antes de ejecutarlo. Si confirmo, aplícalo y reporta el resultado real.",
     },
     {
         "title": ["Por qué standby", "Binance"],
@@ -105,7 +105,7 @@ def upsert_model(
         "function_calling": "native",
     }
     meta = {
-        "description": "Copiloto Synaptika Trade — bots VPS + control (modo/HALT/knobs/órdenes); ejecuta al pedir el usuario.",
+        "description": "Copiloto Synaptika Trade — bots VPS + control; pide confirmación antes de escribir.",
         "filterIds": [FILTER_ID],
         # Open WebUI OpenAPI tool server id "0" (Synaptika Ops).
         "toolIds": ["server:0"],
@@ -157,7 +157,7 @@ def upsert_filter(cur: sqlite3.Cursor, user_id: str) -> None:
     content = FILTER_PATH.read_text(encoding="utf-8")
     meta = {
         "description": "Inyecta digest live de Ops y guarda historial de cada turno.",
-        "manifest": {"title": "Synaptika Ops Context", "version": "0.4.0"},
+        "manifest": {"title": "Synaptika Ops Context", "version": "0.5.0"},
     }
     valves = {
         "copilot_url": f"{OPS_URL.rstrip('/')}/ops/api/copilot",
@@ -260,7 +260,7 @@ def main() -> int:
                 "name": "Synaptika Ops",
                 "description": (
                     "API Ops: lectura + control (halt/mode/knobs/intents) para "
-                    "Binance y Alpaca paper. Write tools se ejecutan al pedir el usuario (sin OK extra)."
+                    "Binance y Alpaca paper. En Chat IA pide confirmación antes de write tools."
                 ),
             },
         }

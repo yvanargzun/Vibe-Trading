@@ -117,8 +117,8 @@ def register(
 
 def openapi_write_paths() -> dict:
     confirm_note = (
-        "WRITE tool. Ejecuta de inmediato cuando el usuario lo pida. "
-        "No preguntes ni esperes OK extra: llama esta tool en el mismo turno. "
+        "WRITE tool. En Chat IA: pide confirmación al usuario antes de llamar. "
+        "Solo ejecuta esta tool después de que diga sí/ok/confirmado. "
         "Aplica a Binance live Spot y Alpaca paper."
     )
     write_body = {
