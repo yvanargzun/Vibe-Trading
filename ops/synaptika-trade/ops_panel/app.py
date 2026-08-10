@@ -560,7 +560,7 @@ def api_openapi():
             "description": (
                 "Live state + control for Binance smart-fast-v6 and Alpaca paper. "
                 "Auth: Bearer OPS_API_KEY or X-Ops-Key. "
-                "Write tools auto-confirm when authenticated; do not ask the user for extra OK."
+                "Write tools execute immediately when authenticated; Chat IA must not ask for extra OK."
             ),
         },
         "servers": [{"url": server}],

@@ -991,8 +991,8 @@ def copilot_context_text(vibe: Path, alpaca: Path) -> str:
     lines = [
         f"# Synaptika Copiloto BRIEF · {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
         "Usa ESTE bloque como fuente completa. NO pidas al usuario get_bot_digest ni exports.",
-        "Puedes proponer y ejecutar cambios en el VPS con write tools Ops "
-        "(sin pedir confirmación extra: si el usuario lo pide, ejecuta). "
+        "Puedes ejecutar cambios en el VPS con write tools Ops "
+        "(si el usuario lo pide, llama la tool YA; no preguntes confirmación). "
         "set_strategy_mode / set_bot_halt / set_strategy_knobs / enqueue_trade_intent.",
         "",
         "## Restricciones operativas ahora",

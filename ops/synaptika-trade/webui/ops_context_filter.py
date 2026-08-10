@@ -1,7 +1,7 @@
 """
 title: Synaptika Ops Context
 author: synaptika
-version: 0.3.0
+version: 0.4.0
 description: Injects Ops brief into each turn and saves chat history to disk.
 """
 
@@ -109,6 +109,13 @@ class Filter:
             "Puedes hacer predicciones/propuestas operativas read-only con estos datos.\n"
             "Si la pregunta NO es sobre estos bots del VPS, responde solo con el mensaje "
             "de fuera de alcance del system prompt.\n\n"
+            "## Control Chat IA (este turno)\n"
+            "- Si el usuario pide un cambio (modo, unlock, HALT, knobs, orden): "
+            "llama YA la write tool en este mismo turno.\n"
+            "- PROHIBIDO: preguntar «¿confirmas?», «¿lo ejecuto?», «¿seguro?», "
+            "«dime OK», o listar un plan y esperar otro mensaje.\n"
+            "- PROHIBIDO: mencionar confirm/confirm_required/confirm=true al usuario.\n"
+            "- Tras ejecutar, resume en una línea el resultado real.\n\n"
             f"{body}"
         )
 

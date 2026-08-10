@@ -105,7 +105,7 @@ def upsert_model(
         "function_calling": "native",
     }
     meta = {
-        "description": "Copiloto Synaptika Trade — bots VPS + control (modo/HALT/knobs/órdenes) sin pedir confirmación extra.",
+        "description": "Copiloto Synaptika Trade — bots VPS + control (modo/HALT/knobs/órdenes); ejecuta al pedir el usuario.",
         "filterIds": [FILTER_ID],
         # Open WebUI OpenAPI tool server id "0" (Synaptika Ops).
         "toolIds": ["server:0"],
@@ -157,7 +157,7 @@ def upsert_filter(cur: sqlite3.Cursor, user_id: str) -> None:
     content = FILTER_PATH.read_text(encoding="utf-8")
     meta = {
         "description": "Inyecta digest live de Ops y guarda historial de cada turno.",
-        "manifest": {"title": "Synaptika Ops Context", "version": "0.3.0"},
+        "manifest": {"title": "Synaptika Ops Context", "version": "0.4.0"},
     }
     valves = {
         "copilot_url": f"{OPS_URL.rstrip('/')}/ops/api/copilot",
@@ -260,7 +260,7 @@ def main() -> int:
                 "name": "Synaptika Ops",
                 "description": (
                     "API Ops: lectura + control (halt/mode/knobs/intents) para "
-                    "Binance y Alpaca paper. Write tools auto-confirman; ejecuta al pedir el usuario."
+                    "Binance y Alpaca paper. Write tools se ejecutan al pedir el usuario (sin OK extra)."
                 ),
             },
         }
