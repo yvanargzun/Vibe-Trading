@@ -193,6 +193,58 @@ def _lead_agent_ids(run: SwarmRun) -> set[str]:
     return leads
 
 
+def is_free_tier_config() -> bool:
+    """Detect zero-cost model config (``SWARM_FREE_TIER`` or ``:free`` model ids)."""
+    raw = ""
+    try:
+        from src.config.accessor import get_env_config
+
+        cfg = get_env_config()
+        raw = (cfg.swarm.swarm_free_tier or "auto").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        model = (cfg.llm.langchain_model_name or "").strip()
+        worker = (cfg.swarm.swarm_worker_model or "").strip()
+        lead = (cfg.swarm.swarm_lead_model or "").strip()
+    except Exception:
+        raw = (os.environ.get("SWARM_FREE_TIER") or "auto").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        model = (os.environ.get("LANGCHAIN_MODEL_NAME") or "").strip()
+        worker = (os.environ.get("SWARM_WORKER_MODEL") or "").strip()
+        lead = (os.environ.get("SWARM_LEAD_MODEL") or "").strip()
+    return any(x.endswith(":free") for x in (model, worker, lead) if x)
+
+
+def apply_free_tier_agent_limits(run: SwarmRun) -> None:
+    """Clamp iterations/timeouts when running on free-tier models."""
+    if not is_free_tier_config():
+        return
+    try:
+        from src.config.accessor import get_env_config
+
+        swarm = get_env_config().swarm
+        max_iter = int(swarm.swarm_free_max_iter)
+        timeout = int(swarm.swarm_free_timeout_s)
+    except Exception:
+        max_iter = int(os.environ.get("SWARM_FREE_MAX_ITER") or "20")
+        timeout = int(os.environ.get("SWARM_FREE_TIMEOUT_S") or "600")
+    for agent in run.agents:
+        if agent.max_iterations and agent.max_iterations > max_iter:
+            agent.max_iterations = max_iter
+        if agent.timeout_seconds and agent.timeout_seconds > timeout:
+            agent.timeout_seconds = timeout
+    logger.info(
+        "SWARM_FREE_TIER clamps max_iterations<=%s timeout_seconds<=%s",
+        max_iter,
+        timeout,
+    )
+
+
 def apply_speed_model_overrides(run: SwarmRun) -> None:
     """Assign ``SWARM_WORKER_MODEL`` / ``SWARM_LEAD_MODEL`` when YAML omits model_name.
 
@@ -208,18 +260,18 @@ def apply_speed_model_overrides(run: SwarmRun) -> None:
         worker_model = (os.environ.get("SWARM_WORKER_MODEL") or "").strip()
         lead_model = (os.environ.get("SWARM_LEAD_MODEL") or "").strip()
 
-    if not worker_model and not lead_model:
-        return
+    if worker_model or lead_model:
+        leads = _lead_agent_ids(run)
+        for agent in run.agents:
+            if agent.model_name:
+                continue
+            if agent.id in leads:
+                if lead_model:
+                    agent.model_name = lead_model
+            elif worker_model:
+                agent.model_name = worker_model
 
-    leads = _lead_agent_ids(run)
-    for agent in run.agents:
-        if agent.model_name:
-            continue
-        if agent.id in leads:
-            if lead_model:
-                agent.model_name = lead_model
-        elif worker_model:
-            agent.model_name = worker_model
+    apply_free_tier_agent_limits(run)
 
 
 def estimate_speedup_factors(

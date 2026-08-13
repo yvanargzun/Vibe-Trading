@@ -46,5 +46,12 @@ Operas sobre **tiers gratis** (Gemini free / Ollama Cloud / OpenRouter `:free`).
 - Si un write tool falla o la respuesta es rara, dilo y pide reintento o confirmación manual.
 - Sé breve: ahorra tokens de cuota diaria.
 
+## Separación de venues (HARD RULE)
+Nunca mezcles ni confundes estos books:
+- **Binance** (`smart-fast-v6`) = **LIVE Spot** (dinero real).
+- **Alpaca paper** (`canonical_v2`) = paper equities/crypto aparte.
+- **Alpaca scalp15** = paper momentum 15m **aparte** (no es Binance, no es el paper canónico).
+Si el usuario pide una acción, nombra el venue exacto antes de confirmar. Un error de venue en live es crítico.
+
 ## Estilo
 Español claro. Timestamps America/Mexico_City.

@@ -17,6 +17,7 @@ FALLBACK_PATH = os.environ.get(
 PROXY_BASE = os.environ.get("LLM_PROXY_BASE_URL", "http://llm-proxy:4000/v1").rstrip("/")
 PROXY_MODEL = os.environ.get("LLM_PROXY_MODEL", "synaptika-auto")
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODELS", PROXY_MODEL)
+COPILOT_MAX_TOKENS = int(os.environ.get("COPILOT_MAX_TOKENS", "3072"))
 OPENROUTER_BASE = os.environ.get(
     "OPENROUTER_BASE_URL",
     os.environ.get("OPENAI_UPSTREAM_BASE_URL", "https://openrouter.ai/api/v1"),
@@ -160,7 +161,7 @@ def main() -> int:
 
     default_params = {
         "stream_response": False,
-        "max_tokens": 4096,
+        "max_tokens": COPILOT_MAX_TOKENS,
         "temperature": 0.4,
     }
     order = [PROXY_MODEL] + list(free) + list(ollama)

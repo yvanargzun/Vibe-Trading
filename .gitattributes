@@ -1,1 +1,3 @@
 ﻿ops/hetzner/*.sh text eol=lf
+ops/synaptika-trade/**/*.sh text eol=lf
+*.sh text eol=lf

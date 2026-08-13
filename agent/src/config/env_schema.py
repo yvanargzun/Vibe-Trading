@@ -295,6 +295,11 @@ class SwarmConfig(_EnvBase):
     swarm_lead_model: str = Field(alias="SWARM_LEAD_MODEL", default="")
     swarm_lead_agent_ids: str = Field(alias="SWARM_LEAD_AGENT_IDS", default="")
     swarm_ollama_keep_alive_s: int = Field(alias="SWARM_OLLAMA_KEEP_ALIVE_S", default=60)
+    # When auto/true: clamp worker iterations/timeouts for :free models.
+    swarm_free_tier: str = Field(alias="SWARM_FREE_TIER", default="auto")
+    swarm_free_max_iter: int = Field(alias="SWARM_FREE_MAX_ITER", default=20)
+    swarm_free_timeout_s: int = Field(alias="SWARM_FREE_TIMEOUT_S", default=600)
+    swarm_grounding_cache_ttl_s: int = Field(alias="SWARM_GROUNDING_CACHE_TTL_S", default=300)
 
 
 # ---------------------------------------------------------------------------

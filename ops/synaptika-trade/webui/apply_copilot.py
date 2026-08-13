@@ -17,6 +17,7 @@ COPILOT_ID = "synaptika-copiloto"
 OLLAMA_COPILOT_ID = "synaptika-ollama"
 OLLAMA_DEFAULT_BASE = os.environ.get("OLLAMA_DEFAULT_MODEL", "deepseek-v4-flash")
 PROXY_MODEL = os.environ.get("LLM_PROXY_MODEL", "synaptika-auto")
+COPILOT_MAX_TOKENS = int(os.environ.get("COPILOT_MAX_TOKENS", "3072"))
 OPS_URL = os.environ.get("OPS_TOOL_URL", "http://ops:8787")
 OPS_OPENAPI_PATH = os.environ.get("OPS_TOOL_OPENAPI_PATH", "/ops/api/openapi.json")
 OPS_API_KEY = os.environ.get("OPS_API_KEY", "").strip()
@@ -100,7 +101,7 @@ def upsert_model(
         # for OpenAPI Tool Server (read + write Ops tools).
         # Non-stream: llm-proxy failover is reliable without SSE mid-flight drops.
         "stream_response": False,
-        "max_tokens": 4096,
+        "max_tokens": COPILOT_MAX_TOKENS,
         "temperature": 0.4,
         "function_calling": "native",
     }
@@ -280,7 +281,7 @@ def main() -> int:
             {
                 "system": prompt,
                 "stream_response": False,
-                "max_tokens": 4096,
+                "max_tokens": COPILOT_MAX_TOKENS,
                 "temperature": 0.4,
                 "function_calling": "native",
             },

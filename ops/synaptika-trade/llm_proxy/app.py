@@ -115,6 +115,73 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+_quota_fail_streak = 0
+_last_quota_alert_ts = 0.0
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+QUOTA_ALERT_STREAK = max(1, int(os.environ.get("LLM_PROXY_429_ALERT_STREAK", "3")))
+
+
+def _is_quota_failure(code: int, text: str) -> bool:
+    if code == 429:
+        return True
+    low = (text or "").lower()
+    return any(
+        m in low
+        for m in (
+            "rate limit",
+            "rate_limit",
+            "quota",
+            "free-models-per-day",
+            "insufficient",
+            "resource_exhausted",
+        )
+    )
+
+
+def note_upstream_result(code: int, text: str, label: str) -> None:
+    """Track free-tier quota failures and Telegram-alert on streaks."""
+    global _quota_fail_streak, _last_quota_alert_ts
+    import time
+
+    if _is_quota_failure(code, text):
+        _quota_fail_streak += 1
+        log(f"quota_fail streak={_quota_fail_streak} {label}")
+    else:
+        if code == 200:
+            _quota_fail_streak = 0
+        return
+
+    if _quota_fail_streak < QUOTA_ALERT_STREAK:
+        return
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    now = time.time()
+    if now - _last_quota_alert_ts < 900:
+        return
+    _last_quota_alert_ts = now
+    msg = (
+        f"⚠️ Synaptika LLM quota: {_quota_fail_streak} free-tier failures "
+        f"(latest {label}). Failover still trying Gemini→Ollama→OpenRouter :free."
+    )
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = json.dumps(
+            {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        log("quota telegram alert sent")
+    except Exception as exc:  # noqa: BLE001
+        log(f"quota telegram alert failed: {exc}")
+
+
 def providers() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     if GEMINI_KEY:
@@ -232,6 +299,7 @@ def try_chat(body: dict[str, Any]) -> tuple[int, bytes, str, str]:
                     if choices:
                         doc.setdefault("synaptika_proxy", {})["via"] = label
                         raw_out = json.dumps(doc).encode("utf-8")
+                        note_upstream_result(code, text, label)
                         log(f"OK {label}")
                         return 200, raw_out, "application/json", label
                 except json.JSONDecodeError:
@@ -239,6 +307,7 @@ def try_chat(body: dict[str, Any]) -> tuple[int, bytes, str, str]:
                 errors.append(f"{label} empty_response")
                 log(f"FAIL {label} empty")
                 continue
+            note_upstream_result(code, text, label)
             if is_failover_status(code) or body_needs_failover(text):
                 errors.append(f"{label} http={code} {text[:160]}")
                 log(f"FAIL {label} http={code}")
