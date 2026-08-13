@@ -341,20 +341,22 @@ def test_runtime_overrides_fall_back_to_base_config_when_merge_is_invalid(tmp_pa
 
 
 def test_explicit_config_path_does_not_mutate_default_runtime_root(tmp_path: Path) -> None:
+    from src.config.paths import get_project_anchor
+
     config_path = tmp_path / "nested" / "agent.json"
     load_agent_config(config_path)
 
     assert get_runtime_root(config_path) == config_path.parent
-    assert get_runtime_root() == Path.home() / ".vibe-trading"
+    assert get_runtime_root() == get_project_anchor() / "vibe_workspace"
     assert get_config_path(config_path) == config_path
 
 
-def test_get_data_dir_uses_explicit_config_parent(tmp_path: Path) -> None:
+def test_get_data_dir_uses_runtime_data_subdir(tmp_path: Path) -> None:
     config_path = tmp_path / "nested" / "agent.json"
 
     assert get_runtime_root(config_path) == config_path.parent
-    assert get_data_dir(config_path) == config_path.parent
-    assert config_path.parent.exists()
+    assert get_data_dir(config_path) == config_path.parent / "data"
+    assert (config_path.parent / "data").exists()
 
 
 # ---------------------------------------------------------------------------

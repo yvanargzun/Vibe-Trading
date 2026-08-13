@@ -342,7 +342,7 @@ def build_run_from_preset(preset_name: str, user_vars: dict[str, str]) -> SwarmR
     short_uuid = uuid.uuid4().hex[:8]
     run_id = f"swarm-{ts}-{short_uuid}"
 
-    return SwarmRun(
+    run = SwarmRun(
         id=run_id,
         preset_name=preset_name,
         status=RunStatus.pending,
@@ -351,3 +351,10 @@ def build_run_from_preset(preset_name: str, user_vars: dict[str, str]) -> SwarmR
         tasks=tasks,
         created_at=now.isoformat(),
     )
+    try:
+        from src.swarm.speed import apply_speed_model_overrides
+
+        apply_speed_model_overrides(run)
+    except Exception:
+        pass
+    return run

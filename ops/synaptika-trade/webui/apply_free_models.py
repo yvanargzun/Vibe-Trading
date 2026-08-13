@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Configure Open WebUI OpenAI connections: OpenRouter :free + Ollama Cloud."""
+"""Configure Open WebUI OpenAI connections: llm-proxy + OpenRouter + Ollama Cloud."""
 from __future__ import annotations
 
 import json
@@ -14,13 +14,24 @@ DB = os.environ.get("WEBUI_DB", "/app/backend/data/webui.db")
 FALLBACK_PATH = os.environ.get(
     "FREE_MODELS_FILE", "/srv/webui/free_models.json"
 )
-DEFAULT_MODEL = os.environ.get(
-    "DEFAULT_MODELS", "inclusionai/ling-3.0-flash:free"
-)
+PROXY_BASE = os.environ.get("LLM_PROXY_BASE_URL", "http://llm-proxy:4000/v1").rstrip("/")
+PROXY_MODEL = os.environ.get("LLM_PROXY_MODEL", "synaptika-auto")
+DEFAULT_MODEL = os.environ.get("DEFAULT_MODELS", PROXY_MODEL)
+COPILOT_MAX_TOKENS = int(os.environ.get("COPILOT_MAX_TOKENS", "3072"))
 OPENROUTER_BASE = os.environ.get(
-    "OPENAI_API_BASE_URL", "https://openrouter.ai/api/v1"
+    "OPENROUTER_BASE_URL",
+    os.environ.get("OPENAI_UPSTREAM_BASE_URL", "https://openrouter.ai/api/v1"),
 ).rstrip("/")
-OPENROUTER_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENROUTER_KEY = (
+    os.environ.get("OPENROUTER_API_KEY", "").strip()
+    or os.environ.get("OPENAI_UPSTREAM_API_KEY", "").strip()
+    or os.environ.get("OPENAI_API_KEY", "").strip()
+)
+if OPENROUTER_KEY in ("synaptika-proxy", "unused", "proxy"):
+    OPENROUTER_KEY = (
+        os.environ.get("OPENROUTER_API_KEY", "").strip()
+        or os.environ.get("OPENAI_UPSTREAM_API_KEY", "").strip()
+    )
 OLLAMA_BASE = os.environ.get(
     "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"
 ).rstrip("/")
@@ -29,7 +40,6 @@ OLLAMA_KEY = (
     or os.environ.get("OLLAMA_CLOUD_API_KEY", "").strip()
 )
 
-# Curated cloud models shown in chat (order = preference)
 OLLAMA_PREFERRED = [
     "deepseek-v4-flash",
     "gpt-oss:20b",
@@ -83,7 +93,6 @@ def fetch_ollama_models() -> list[str]:
         for m in data.get("data", [])
         if isinstance(m.get("id"), str) and m["id"].strip()
     ]
-    # Prefer curated order, then any remaining
     preferred = [m for m in OLLAMA_PREFERRED if m in ids]
     rest = sorted(m for m in ids if m not in preferred)
     return preferred + rest
@@ -96,7 +105,7 @@ def load_fallback() -> list[str]:
         return [m for m in models if isinstance(m, str) and m.endswith(":free")]
     except Exception as exc:  # noqa: BLE001
         print(f"fallback load failed: {exc}", file=sys.stderr)
-        return [DEFAULT_MODEL]
+        return ["google/gemma-4-31b-it:free", "inclusionai/ling-3.0-flash:free"]
 
 
 def upsert(cur: sqlite3.Cursor, key: str, value) -> None:
@@ -111,12 +120,23 @@ def upsert(cur: sqlite3.Cursor, key: str, value) -> None:
 
 def main() -> int:
     free = fetch_free_models() or load_fallback()
-    if DEFAULT_MODEL not in free:
-        free = [DEFAULT_MODEL] + [m for m in free if m != DEFAULT_MODEL]
     ollama = fetch_ollama_models()
 
     api_configs: dict = {
         "0": {
+            "enable": True,
+            "url": PROXY_BASE,
+            "key": "synaptika-proxy",
+            "model_ids": [PROXY_MODEL],
+            "connection_type": "external",
+            "prefix_id": "",
+            "tags": ["auto", "failover"],
+            "provider": "synaptika-proxy",
+        }
+    }
+    n = 1
+    if OPENROUTER_KEY:
+        api_configs[str(n)] = {
             "enable": True,
             "url": OPENROUTER_BASE,
             "key": OPENROUTER_KEY,
@@ -126,9 +146,9 @@ def main() -> int:
             "tags": ["free", "openrouter"],
             "provider": "openrouter",
         }
-    }
+        n += 1
     if OLLAMA_KEY:
-        api_configs["1"] = {
+        api_configs[str(n)] = {
             "enable": True,
             "url": OLLAMA_BASE,
             "key": OLLAMA_KEY,
@@ -140,13 +160,11 @@ def main() -> int:
         }
 
     default_params = {
-        "stream_response": True,
-        "max_tokens": 4096,
+        "stream_response": False,
+        "max_tokens": COPILOT_MAX_TOKENS,
         "temperature": 0.4,
     }
-
-    # Model picker order: copiloto stay default via apply_copilot; here list free then cloud
-    order = list(free) + list(ollama)
+    order = [PROXY_MODEL] + list(free) + list(ollama)
 
     con = sqlite3.connect(DB, timeout=60)
     try:
@@ -154,17 +172,16 @@ def main() -> int:
         upsert(cur, "ollama.enable", False)
         upsert(cur, "openai.enable", True)
         upsert(cur, "openai.api_configs", api_configs)
-        # Dual endpoints (some OWUI builds also read these)
-        upsert(
-            cur,
-            "openai.api_base_urls",
-            [OPENROUTER_BASE] + ([OLLAMA_BASE] if OLLAMA_KEY else []),
-        )
-        upsert(
-            cur,
-            "openai.api_keys",
-            [OPENROUTER_KEY] + ([OLLAMA_KEY] if OLLAMA_KEY else []),
-        )
+        bases = [PROXY_BASE]
+        keys = ["synaptika-proxy"]
+        if OPENROUTER_KEY:
+            bases.append(OPENROUTER_BASE)
+            keys.append(OPENROUTER_KEY)
+        if OLLAMA_KEY:
+            bases.append(OLLAMA_BASE)
+            keys.append(OLLAMA_KEY)
+        upsert(cur, "openai.api_base_urls", bases)
+        upsert(cur, "openai.api_keys", keys)
         upsert(cur, "ui.default_models", DEFAULT_MODEL)
         upsert(cur, "ui.model_order_list", order)
         upsert(cur, "models.default_params", default_params)
@@ -174,17 +191,16 @@ def main() -> int:
         con.close()
 
     print(
-        f"ok free={len(free)} ollama_cloud={len(ollama)} "
-        f"default={DEFAULT_MODEL} ollama_key={'yes' if OLLAMA_KEY else 'no'}"
+        f"ok proxy={PROXY_MODEL} free={len(free)} ollama_cloud={len(ollama)} "
+        f"default={DEFAULT_MODEL} openrouter_key={'yes' if OPENROUTER_KEY else 'no'} "
+        f"ollama_key={'yes' if OLLAMA_KEY else 'no'}"
     )
-    for m in free[:8]:
-        print(f"  free - {m}")
-    if len(free) > 8:
-        print(f"  free ... +{len(free)-8}")
-    for m in ollama:
-        print(f"  ollama - {m}")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:  # noqa: BLE001
+        print(f"fatal: {exc}", file=sys.stderr)
+        raise SystemExit(1)

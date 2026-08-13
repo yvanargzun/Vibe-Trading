@@ -22,26 +22,38 @@ OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 El chat solo lista modelos OpenRouter con sufijo `:free` (sin créditos de pago).
-Default: `inclusionai/ling-3.0-flash:free`. Tras deploy corre
-`webui/apply_free_models.py` para fijar la allowlist en la DB de Open WebUI.
+Default copiloto: `synaptika-auto` (Gemini → Ollama Cloud → OpenRouter `:free`).
+Failover OpenRouter prioriza Gemma-4 / Nemotron free; **no** usa gpt-4o-mini/Haiku salvo
+`ALLOW_PAID_OPENROUTER=1`. Tras deploy corre `webui/apply_free_models.py`.
 
 
 Symlink: `ln -sfn secrets.env .env`
 
-## Ops API (read-only)
+## Ops API (lectura + control)
 
-Auth: cookie de sesión **o** `X-Ops-Key: $OPS_API_KEY`.
+Auth: cookie de sesión **o** `X-Ops-Key` / `Authorization: Bearer $OPS_API_KEY`.
 
 | Path | Descripción |
 |------|-------------|
 | `/ops/api/status` | Snapshot + equity + activity |
 | `/ops/api/digest` | Texto ES para el modelo |
+| `/ops/api/copilot` | Brief live (incluye instrucciones de control) |
 | `/ops/api/strategy` | Briefs + modo live |
 | `/ops/api/activity` | Ciclos / trades / skips |
 | `/ops/api/equity` | Series Chart.js |
-| `/ops/api/openapi.json` | Spec OpenAPI para Tool Server |
+| `/ops/api/control` | GET estado control (locks/HALT/knobs/intents) |
+| `/ops/api/control/mode` | POST forzar modo (`confirm=true`) |
+| `/ops/api/control/unlock` | POST soltar lock de modo |
+| `/ops/api/control/halt` | POST halt/resume |
+| `/ops/api/control/notify` | POST filtro Telegram |
+| `/ops/api/control/knobs` | POST overlay TP/SL/ORDER_USD/… |
+| `/ops/api/control/intent` | POST buy/sell/close (cola del bot) |
+| `/ops/api/openapi.json` | Spec OpenAPI para Tool Server (read+write) |
 
-Ver [webui/README.md](webui/README.md) para cablear Open WebUI.
+Write tools (POST) requieren `confirm=true` tras OK del usuario en el chat Ops.
+El copiloto Open WebUI las llama vía Tool Server (`server:0`); no hace falta Cursor.
+
+Ver [webui/README.md](webui/README.md).
 
 ## Caddy / chat
 

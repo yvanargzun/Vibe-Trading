@@ -2,10 +2,10 @@
 """Telegram control: filter keyboard + on-demand strategy charts.
 
 Commands (natural language or slash; ignore notify filter):
-  binance v6 smart fast  → chart Binance
-  eth scalping           → chart ETH scalper
-  alpaca paper scalping  → chart Alpaca paper
-  estado                 → charts only (Binance + ETH + Alpaca)
+  binance / v6           → chart Binance smart-fast-v6
+  alpaca / paper         → chart Alpaca core (canonical_v2)
+  scalp15 / 15m          → chart Alpaca scalp15 momentum
+  estado                 → charts Binance + Alpaca + scalp15
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from telegram_notify_prefs import (
     BTN_FB,
     BTN_SALES_EXIT,
     BTN_SALES_TEST,
-    BTN_SCALPER,
+    BTN_SCALP15,
     BTN_VIBE,
     BUTTON_TO_MODE,
     filter_keyboard,
@@ -39,22 +39,23 @@ from telegram_notify_prefs import (
 
 HOME = Path("/root/.vibe-trading")
 ALPACA = Path("/root/.alpaca-paper")
+ALPACA_SCALP15 = Path("/root/.alpaca-scalp15")
 PREFS_PORT = 8897
 DEFAULT_MESSENGER_URL = "https://synaptika-messengerfb.onrender.com"
 HELP_TEXT = (
-    "Comandos (resumen detallado + grafica):\n"
-    "• binance v6 smart fast  — panorama Binance\n"
-    "• eth scalping           — panorama Scalper ETH\n"
-    "• alpaca paper scalping  — panorama Alpaca paper\n"
-    "• estado                 — los 3 panoramas juntos\n\n"
-    "Atajos: /binance  /eth  /alpaca  /estado\n"
-    "Filtro de avisos automaticos: /filtro\n\n"
+    "Comandos (resumen + gráfica):\n"
+    "• binance / v6           — Binance smart-fast-v6\n"
+    "• alpaca                 — Alpaca paper core\n"
+    "• scalp15 / 15m          — Alpaca scalp15 (momentum 15m)\n"
+    "• estado                 — los 3 panoramas\n\n"
+    "Atajos: /binance  /alpaca  /scalp15  /estado\n"
+    "Filtro de avisos: /filtro\n\n"
     "Probar ventas:\n"
-    f"• {BTN_SALES_TEST} — chat con Messenger sales (bypass owner skip)\n"
-    f"• {BTN_SALES_EXIT} — vuelve a trading/comandos\n\n"
+    f"• {BTN_SALES_TEST} — chat Messenger sales\n"
+    f"• {BTN_SALES_EXIT} — vuelve a trading\n\n"
     "Botones filtro:\n"
     f"• {BTN_VIBE}\n"
-    f"• {BTN_SCALPER}\n"
+    f"• {BTN_SCALP15}\n"
     f"• {BTN_FB}\n"
     f"• {BTN_ALL}"
 )
@@ -62,9 +63,19 @@ HELP_TEXT = (
 
 def _read_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list):
+        # legacy equity_history list → chart format
+        pts = []
+        for p in raw:
+            if isinstance(p, dict) and "equity" in p:
+                pts.append({"ts": float(p.get("ts") or 0), "equity": float(p.get("equity") or 0)})
+        return {"points": pts, "markers": [], "start_equity": pts[0]["equity"] if pts else None}
+    return {}
 
 
 def _norm(text: str) -> str:
@@ -76,11 +87,10 @@ def _norm(text: str) -> str:
 
 
 def detect_intent(text: str) -> str | None:
-    """Return vibe|scalper|alpaca|estado|help|filtro or None."""
+    """Return vibe|alpaca|scalp15|estado|help|filtro or None."""
     n = _norm(text)
     if not n:
         return None
-    # strip leading slash for matching
     bare = n[1:] if n.startswith("/") else n
 
     if bare in ("ayuda", "help") or bare.startswith("ayuda ") or bare.startswith("help "):
@@ -88,39 +98,36 @@ def detect_intent(text: str) -> str | None:
     if bare in ("filtro", "menu", "start") or bare.startswith("filtro"):
         return "filtro"
 
-    # estado / status first (exact-ish)
     if bare in ("estado", "status", "all", "todo", "todas") or bare.startswith(
         ("estado ", "status ")
     ):
         return "estado"
 
-    # alpaca before generic "scalping"
+    # scalp15 before bare "alpaca" / "scalp"
+    if any(
+        k in bare
+        for k in (
+            "scalp15",
+            "scalp 15",
+            "15m",
+            "15 m",
+            "momentum 15",
+            "/scalp15",
+        )
+    ) or bare in ("s15", "sc15"):
+        return "scalp15"
+
     if any(
         k in bare
         for k in (
             "alpaca",
-            "paper scalp",
             "paper trading",
             "alpaca paper",
+            "canonical",
         )
-    ):
+    ) and "scalp15" not in bare and "15m" not in bare:
         return "alpaca"
 
-    # eth scalper
-    if any(
-        k in bare
-        for k in (
-            "eth scalp",
-            "eth scalping",
-            "scalper eth",
-            "scalping eth",
-            "/eth",
-            "eth ",
-        )
-    ) or bare in ("scalper", "scalp", "/scalper", "/scalp", "eth"):
-        return "scalper"
-
-    # binance / vibe / smart fast v6
     if any(
         k in bare
         for k in (
@@ -134,6 +141,16 @@ def detect_intent(text: str) -> str | None:
         )
     ) or bare in ("binance", "vibe", "trading"):
         return "vibe"
+
+    # retired eth scalper → redirect tip via help-ish
+    if any(k in bare for k in ("eth scalp", "/eth", "scalper eth")) or bare in (
+        "eth",
+        "scalper",
+        "scalp",
+        "/scalper",
+        "/scalp",
+    ):
+        return "retired_eth"
 
     return None
 
@@ -192,6 +209,21 @@ def build_vibe_digest() -> str:
         f"- Cambio vs punto anterior: {sign}{chg:.2f}%",
         f"- Cambio del dia (mark vs apertura): {book_sign}${book_pnl:.2f} ({book_pct_sign}{book_pct:.2f}%)",
     ]
+    # Strategy mode (Ops / Hermes visibility)
+    try:
+        mode_doc = _read_json(HOME / "strategy_mode.json")
+        m = str(mode_doc.get("mode") or "?")
+        locked = bool(mode_doc.get("locked"))
+        reason = str(mode_doc.get("reason") or "")[:120]
+        lock_s = "LOCKED" if locked else "auto"
+        lines += [
+            "",
+            "Estrategia",
+            f"- Modo: {m} · {lock_s} · strategy=smart-fast-v6",
+            f"- Motivo: {reason or '—'}",
+        ]
+    except Exception:
+        pass
     if daily_target > 0 or weekly_target > 0:
         lines += ["", "Metas"]
         if daily_target > 0:
@@ -234,70 +266,49 @@ def build_vibe_digest() -> str:
     return text[:3397] + "..." if len(text) > 3400 else text
 
 
-def build_scalper_digest() -> str:
-    st = _read_json(HOME / "eth_scalp_state.json")
-    eq, day_open, _, _, _ = _scalper_equity()
-    hist = _read_json(HOME / "eth_scalp_equity_history.json")
+def build_scalp15_digest() -> str:
+    st = _read_json(ALPACA_SCALP15 / "state.json")
+    eq, day_open, week_open, daily_target, weekly_target = _scalp15_equity()
+    hist = _read_json(ALPACA_SCALP15 / "equity_history.json")
     pts = list(hist.get("points") or [])
     prev_eq = float(pts[-2]["equity"]) if len(pts) >= 2 else eq
     chg = _pct(eq, prev_eq) if prev_eq else 0.0
-    realized = float(st.get("realized_pnl_today") or 0)
-    # Mark change vs day open only if day_open is sane (<= 3x equity)
-    mark_pnl = 0.0
-    mark_pct = 0.0
-    if day_open > 0 and eq > 0 and day_open <= eq * 3 and eq <= day_open * 3:
-        mark_pnl = eq - day_open
-        mark_pct = _pct(eq, day_open)
-    pos = st.get("position") or {}
-    reserved = float(st.get("reserved_usdt") or 0)
-    bank = float(st.get("bankroll_usdt") or 0)
-    fills = st.get("fills_today") or 0
-    rounds = st.get("roundtrips_today") or 0
+    book_pnl = eq - day_open if day_open else 0.0
+    book_pct = _pct(eq, day_open) if day_open else 0.0
+    pos = st.get("positions") or {}
+    pos_lines: list[str] = []
+    if isinstance(pos, dict):
+        for asset, meta in pos.items():
+            usd = float((meta or {}).get("usd") or 0)
+            if usd >= 0.4:
+                pos_lines.append(f"  - {asset}: unos ${usd:.2f}")
     sign = "+" if chg >= 0 else ""
-    rsign = "+" if realized >= 0 else ""
-    msign = "+" if mark_pnl >= 0 else ""
-    mpct_sign = "+" if mark_pct >= 0 else ""
-
+    book_sign = "+" if book_pnl >= 0 else ""
+    book_pct_sign = "+" if book_pct >= 0 else ""
     lines = [
-        "[ETH scalping] Resumen · hybrid scalper",
-        "Pedido ahora (solo capital del scalper + PnL realizado)",
+        "[Alpaca · scalp15] Resumen · momentum 15m",
+        "Pedido ahora (cuenta paper aparte)",
         "",
-        "Capital scalper (real)",
-        f"- Book actual: ${eq:.2f}",
-        f"- Bankroll: ${bank:.2f}" if bank else f"- Bankroll: n/d",
-        f"- Reserved USDT: ${reserved:.2f}",
-        f"- Apertura dia (book): ${day_open:.2f}" if day_open else "- Apertura dia: n/d",
+        "Tu dinero ahora",
+        f"- Equity: ${eq:.2f}",
         f"- Cambio vs punto anterior: {sign}{chg:.2f}%",
+        f"- Cambio del dia: {book_sign}${book_pnl:.2f} ({book_pct_sign}{book_pct:.2f}%)",
         "",
-        "PnL",
-        f"- Realizado hoy (suma de trades cerrados): {rsign}${realized:.2f}",
+        "Que tienes comprado",
     ]
-    if day_open > 0 and (abs(mark_pnl) > 1e-9 or abs(eq - day_open) > 1e-9):
-        lines.append(
-            f"- Mark vs apertura (no es ganancia cerrada): {msign}${mark_pnl:.2f} ({mpct_sign}{mark_pct:.2f}%)"
-        )
-    lines += [
-        "",
-        "Posicion",
-    ]
-    if isinstance(pos, dict) and pos.get("side"):
-        lines.append(
-            f"- {pos.get('side')} @ {pos.get('entry')} (~${float(pos.get('usd') or 0):.2f})"
-        )
-    else:
-        lines.append("- flat (sin trade abierto)")
+    lines.extend(pos_lines or ["- Nada abierto (solo cash)"])
     lines += [
         "",
         "Actividad de hoy",
-        f"- Fills: {fills} | roundtrips: {rounds}",
-        f"- Regimen: {_regime_txt(st.get('last_regime'))}",
-        f"- Futures: {st.get('futures_enabled')}",
-        f"- Kill: {'SI' if st.get('killed') else 'no'} | racha perdidas: {st.get('loss_streak', 0)}",
-        f"- Float activo: {st.get('active_float')}",
+        f"- Buys: {st.get('buys_today') or 0} · trades: {st.get('trades_today') or 0}",
+        f"- Roundtrips: {st.get('roundtrips_today') or 0}",
+        f"- Mercado: {_regime_txt(st.get('regime'))}",
+        f"- Ultimo simbolo: {st.get('last_symbol') or '—'}",
+        f"- Halt: {'SI' if (ALPACA_SCALP15 / 'HALT').exists() else 'no'}",
+        f"- Filtro avisos: {mode_label(load_prefs().get('mode', 'all'))}",
     ]
-    if st.get("pause_until"):
-        lines.append(f"- Pausa hasta: {st.get('pause_until')}")
-    lines.append(f"- Filtro avisos: {mode_label(load_prefs().get('mode', 'all'))}")
+    if daily_target > 0:
+        lines.append(f"- Meta dia: ${daily_target:.2f}")
     text = "\n".join(lines)
     return text[:3397] + "..." if len(text) > 3400 else text
 
@@ -397,8 +408,8 @@ def build_vibe_caption() -> str:
     return build_vibe_digest()
 
 
-def build_scalper_caption() -> str:
-    return build_scalper_digest()
+def build_scalp15_caption() -> str:
+    return build_scalp15_digest()
 
 
 def build_alpaca_caption() -> str:
@@ -417,25 +428,19 @@ def _vibe_equity() -> tuple[float, float, float, float, float]:
     return eq, day_open, week_open, daily_target, weekly_target
 
 
-def _scalper_equity() -> tuple[float, float, float, float, float]:
-    st = _read_json(HOME / "eth_scalp_state.json")
-    hist = _read_json(HOME / "eth_scalp_equity_history.json")
+def _scalp15_equity() -> tuple[float, float, float, float, float]:
+    st = _read_json(ALPACA_SCALP15 / "state.json")
+    hist = _read_json(ALPACA_SCALP15 / "equity_history.json")
+    g = st.get("goals") or {}
     pts = list(hist.get("points") or [])
-    day_open = float(st.get("day_open_equity") or 0)
-    bank = float(st.get("bankroll_usdt") or 0)
-    reserved = float(st.get("reserved_usdt") or 0)
-    last = float(st.get("last_equity") or 0)
-    eq = 0.0
-    if pts:
+    eq = float(st.get("equity") or 0)
+    if eq <= 0 and pts:
         eq = float(pts[-1].get("equity") or 0)
-    if eq <= 0:
-        eq = max(bank, reserved, last, day_open, 0.0)
-    # Reject obviously contaminated history (old whole-wallet ETH ~$13 vs day_open ~$5)
-    if day_open > 0 and eq > day_open * 2.5 and bank > 0:
-        eq = max(bank, reserved, day_open)
-    if day_open <= 0:
-        day_open = eq if eq > 0 else max(bank, reserved, 0.01)
-    return eq, day_open, day_open, 0.0, 0.0
+    day_open = float(g.get("day_open_equity") or eq)
+    week_open = float(g.get("week_open_equity") or eq)
+    daily_target = float(g.get("daily_target_usd") or 0)
+    weekly_target = float(g.get("weekly_target_usd") or 0)
+    return eq, day_open, week_open, daily_target, weekly_target
 
 
 def _alpaca_equity() -> tuple[float, float, float, float, float]:
@@ -575,13 +580,13 @@ def send_strategy_chart(
         channel = "vibe"
         eq, day_open, week_open, daily_target, weekly_target = _vibe_equity()
         text = caption if caption.strip() else build_vibe_digest()
-    elif kind == "scalper":
-        history = HOME / "eth_scalp_equity_history.json"
-        chart_path = HOME / "equity_cmd_eth.png"
-        venue = "ETH scalping"
-        channel = "scalper"
-        eq, day_open, week_open, daily_target, weekly_target = _scalper_equity()
-        text = caption if caption.strip() else build_scalper_digest()
+    elif kind == "scalp15":
+        history = ALPACA_SCALP15 / "equity_history.json"
+        chart_path = ALPACA_SCALP15 / "equity_cmd_scalp15.png"
+        venue = "Alpaca · scalp15"
+        channel = "scalp15"
+        eq, day_open, week_open, daily_target, weekly_target = _scalp15_equity()
+        text = caption if caption.strip() else build_scalp15_digest()
     elif kind == "alpaca":
         history = ALPACA / "equity_history.json"
         chart_path = ALPACA / "equity_cmd_alpaca.png"
@@ -637,12 +642,12 @@ def send_strategy_chart(
 
 
 def send_estado_charts(chat_id: str) -> None:
-    """All three strategies: detailed digest + equity chart each."""
+    """Binance + Alpaca core + Alpaca scalp15."""
     send_strategy_chart(chat_id, kind="vibe", caption=build_vibe_digest())
     time.sleep(0.5)
-    send_strategy_chart(chat_id, kind="scalper", caption=build_scalper_digest())
-    time.sleep(0.5)
     send_strategy_chart(chat_id, kind="alpaca", caption=build_alpaca_digest())
+    time.sleep(0.5)
+    send_strategy_chart(chat_id, kind="scalp15", caption=build_scalp15_digest())
 
 
 def clear_old_ui(chat_id: str, *, force_send: bool = False) -> None:
@@ -652,11 +657,11 @@ def clear_old_ui(chat_id: str, *, force_send: bool = False) -> None:
         "setMyCommands",
         {
             "commands": [
-                {"command": "estado", "description": "3 graficas: Binance + ETH + Alpaca"},
-                {"command": "binance", "description": "Grafica Binance v6 smart fast"},
-                {"command": "eth", "description": "Grafica ETH scalping"},
-                {"command": "alpaca", "description": "Grafica Alpaca paper scalping"},
-                {"command": "sales", "description": "Probar Messenger sales en este chat"},
+                {"command": "estado", "description": "3 gráficas: Binance + Alpaca + scalp15"},
+                {"command": "binance", "description": "Gráfica Binance v6"},
+                {"command": "alpaca", "description": "Gráfica Alpaca core paper"},
+                {"command": "scalp15", "description": "Gráfica Alpaca scalp15 15m"},
+                {"command": "sales", "description": "Probar Messenger sales"},
                 {"command": "trading", "description": "Salir de Messenger sales"},
                 {"command": "filtro", "description": "Ver/cambiar filtro de avisos"},
                 {"command": "ayuda", "description": "Lista de comandos"},
@@ -706,7 +711,7 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
             chat_id,
             f"Filtro guardado: {mode_label(mode)}\n"
             "A partir de ahora solo te mando esa parte.\n"
-            "(Comandos binance / eth / alpaca / estado siguen siempre.)",
+            "(Comandos /binance /alpaca /scalp15 /estado siguen siempre.)",
         )
         return
 
@@ -721,9 +726,9 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
         save_prefs("vibe")
         send_owner(chat_id, f"Filtro guardado: {mode_label('vibe')}")
         return
-    if bare in ("solo_scalper", "filtro_scalper"):
-        save_prefs("scalper")
-        send_owner(chat_id, f"Filtro guardado: {mode_label('scalper')}")
+    if bare in ("solo_scalp15", "filtro_scalp15", "solo_scalper", "filtro_scalper"):
+        save_prefs("scalp15")
+        send_owner(chat_id, f"Filtro guardado: {mode_label('scalp15')}")
         return
     if bare in ("solo_fb", "filtro_fb", "fb"):
         if bare == "fb":
@@ -751,11 +756,18 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
     if intent == "vibe":
         send_strategy_chart(chat_id, kind="vibe", caption=build_vibe_digest())
         return
-    if intent == "scalper":
-        send_strategy_chart(chat_id, kind="scalper", caption=build_scalper_digest())
+    if intent == "scalp15":
+        send_strategy_chart(chat_id, kind="scalp15", caption=build_scalp15_digest())
         return
     if intent == "alpaca":
         send_strategy_chart(chat_id, kind="alpaca", caption=build_alpaca_digest())
+        return
+    if intent == "retired_eth":
+        send_owner(
+            chat_id,
+            "El ETH scalper de Binance ya no existe.\n"
+            "Usa /scalp15 para el nuevo bot Alpaca 15m, o /binance para Spot v6.",
+        )
         return
 
     # Ignore other chatter
@@ -786,7 +798,8 @@ class PrefsHandler(BaseHTTPRequestHandler):
                     "sales_test": bool(prefs.get("sales_test")),
                     "fb": should_notify("fb"),
                     "vibe": should_notify("vibe"),
-                    "scalper": should_notify("scalper"),
+                    "scalp15": should_notify("scalp15"),
+                    "scalper": should_notify("scalp15"),  # legacy alias
                     "updated_ts": prefs.get("updated_ts"),
                 }
             ).encode("utf-8")

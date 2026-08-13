@@ -176,6 +176,44 @@ def fetch_grounding_data(
     if not symbols_list:
         return {}
 
+    # Short TTL disk cache so consecutive swarm runs on quiet markets skip
+    # redundant OHLCV pulls (``SWARM_GROUNDING_CACHE_TTL_S``, default 300).
+    ttl = 300
+    cache_path = None
+    try:
+        ttl = int(get_env_config().swarm.swarm_grounding_cache_ttl_s)
+    except Exception:
+        ttl = int(os.environ.get("SWARM_GROUNDING_CACHE_TTL_S") or "300")
+    if ttl > 0 and today is None:
+        try:
+            import hashlib
+            import json
+            import time
+
+            from src.config.paths import get_runtime_root
+
+            key = hashlib.sha256(
+                f"{','.join(sorted(symbols_list))}|{window_days}".encode()
+            ).hexdigest()[:24]
+            cache_dir = get_runtime_root() / "grounding_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / f"{key}.json"
+            if cache_path.is_file():
+                age = time.time() - cache_path.stat().st_mtime
+                if age <= ttl:
+                    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                    bars = cached.get("bars") if isinstance(cached, dict) else None
+                    if isinstance(bars, dict) and bars:
+                        logger.info(
+                            "grounding: cache hit age=%.0fs symbols=%s",
+                            age,
+                            list(bars)[:8],
+                        )
+                        return bars
+        except Exception:
+            logger.debug("grounding cache read skipped", exc_info=True)
+            cache_path = None
+
     end = today or date.today()
     start = end - timedelta(days=window_days)
     start_str = start.isoformat()
@@ -217,6 +255,20 @@ def fetch_grounding_data(
             })
         if rows:
             out[code] = rows
+
+    if out and cache_path is not None and ttl > 0:
+        try:
+            import json
+
+            from src.config.paths import atomic_write_text
+
+            atomic_write_text(
+                cache_path,
+                json.dumps({"bars": out}, ensure_ascii=False) + "\n",
+            )
+        except Exception:
+            logger.debug("grounding cache write skipped", exc_info=True)
+
     return out
 
 

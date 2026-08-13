@@ -32,6 +32,12 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1}
+      # Free-only OpenRouter failover (set ALLOW_PAID_OPENROUTER=1 to re-enable paid IDs)
+      - OPENROUTER_FAILOVER_MODELS=${OPENROUTER_FAILOVER_MODELS:-google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-nano-30b-a3b:free,nvidia/nemotron-3-super-120b-a12b:free,openai/gpt-oss-20b:free,inclusionai/ling-3.0-flash:free,google/gemma-3-27b-it:free,meta-llama/llama-3.3-70b-instruct:free,qwen/qwen-2.5-72b-instruct:free}
+      - ALLOW_PAID_OPENROUTER=${ALLOW_PAID_OPENROUTER:-0}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - LLM_PROXY_429_ALERT_STREAK=${LLM_PROXY_429_ALERT_STREAK:-3}
     ports:
       - "127.0.0.1:4000:4000"
 
@@ -76,7 +82,8 @@ services:
       - OPS_TOOL_OPENAPI_PATH=/ops/api/openapi.json
       # Copiloto default hits proxy auto model
       - DEFAULT_MODELS=${LLM_PROXY_MODEL:-synaptika-auto}
-      - DEFAULT_MODEL_PARAMS={"stream_response":true,"max_tokens":2048,"temperature":0.4,"function_calling":"native"}
+      - COPILOT_MAX_TOKENS=${COPILOT_MAX_TOKENS:-3072}
+      - DEFAULT_MODEL_PARAMS={"stream_response":false,"max_tokens":3072,"temperature":0.4,"function_calling":"native"}
       - ENABLE_REALTIME_CHAT_SAVE=true
       - CHAT_HISTORY_DIR=/data/chat_history
     volumes:

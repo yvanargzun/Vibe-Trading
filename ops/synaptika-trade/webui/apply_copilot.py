@@ -15,8 +15,9 @@ FREE_PATH = Path(os.environ.get("FREE_MODELS_FILE", "/srv/webui/free_models.json
 DEFAULT_BASE = os.environ.get("DEFAULT_MODELS", "synaptika-auto")
 COPILOT_ID = "synaptika-copiloto"
 OLLAMA_COPILOT_ID = "synaptika-ollama"
-OLLAMA_DEFAULT_BASE = os.environ.get("OLLAMA_DEFAULT_MODEL", "gemma4:31b")
+OLLAMA_DEFAULT_BASE = os.environ.get("OLLAMA_DEFAULT_MODEL", "deepseek-v4-flash")
 PROXY_MODEL = os.environ.get("LLM_PROXY_MODEL", "synaptika-auto")
+COPILOT_MAX_TOKENS = int(os.environ.get("COPILOT_MAX_TOKENS", "3072"))
 OPS_URL = os.environ.get("OPS_TOOL_URL", "http://ops:8787")
 OPS_OPENAPI_PATH = os.environ.get("OPS_TOOL_OPENAPI_PATH", "/ops/api/openapi.json")
 OPS_API_KEY = os.environ.get("OPS_API_KEY", "").strip()
@@ -96,11 +97,11 @@ def upsert_model(
     now = int(time.time())
     params = {
         "system": prompt,
-        # Digest arrives via global filter. Keep native tools for write Ops,
-        # but stream so the UI does not look frozen while the proxy fails over.
-        # llm-proxy wraps the final completion as SSE when stream=true.
-        "stream_response": True,
-        "max_tokens": 2048,
+        # Digest arrives via global filter. Native tool-calling is required
+        # for OpenAPI Tool Server (read + write Ops tools).
+        # Non-stream: llm-proxy failover is reliable without SSE mid-flight drops.
+        "stream_response": False,
+        "max_tokens": COPILOT_MAX_TOKENS,
         "temperature": 0.4,
         "function_calling": "native",
     }
@@ -279,8 +280,8 @@ def main() -> int:
             "models.default_params",
             {
                 "system": prompt,
-                "stream_response": True,
-                "max_tokens": 2048,
+                "stream_response": False,
+                "max_tokens": COPILOT_MAX_TOKENS,
                 "temperature": 0.4,
                 "function_calling": "native",
             },

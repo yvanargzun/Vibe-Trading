@@ -289,6 +289,17 @@ class SwarmConfig(_EnvBase):
     swarm_heartbeat_interval_s: float = Field(alias="SWARM_HEARTBEAT_INTERVAL_S", default=3.0)
     swarm_stream_retry_delay_s: float = Field(alias="SWARM_STREAM_RETRY_DELAY_S", default=1.0)
     swarm_grounding_max_symbols: int = Field(alias="SWARM_GROUNDING_MAX_SYMBOLS", default=8)
+    # Speed / VRAM: safe | balanced | fast (see src/swarm/speed.py).
+    swarm_vram_mode: str = Field(alias="SWARM_VRAM_MODE", default="balanced")
+    swarm_worker_model: str = Field(alias="SWARM_WORKER_MODEL", default="")
+    swarm_lead_model: str = Field(alias="SWARM_LEAD_MODEL", default="")
+    swarm_lead_agent_ids: str = Field(alias="SWARM_LEAD_AGENT_IDS", default="")
+    swarm_ollama_keep_alive_s: int = Field(alias="SWARM_OLLAMA_KEEP_ALIVE_S", default=60)
+    # When auto/true: clamp worker iterations/timeouts for :free models.
+    swarm_free_tier: str = Field(alias="SWARM_FREE_TIER", default="auto")
+    swarm_free_max_iter: int = Field(alias="SWARM_FREE_MAX_ITER", default=20)
+    swarm_free_timeout_s: int = Field(alias="SWARM_FREE_TIMEOUT_S", default=600)
+    swarm_grounding_cache_ttl_s: int = Field(alias="SWARM_GROUNDING_CACHE_TTL_S", default=300)
 
 
 # ---------------------------------------------------------------------------

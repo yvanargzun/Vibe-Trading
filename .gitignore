@@ -88,7 +88,14 @@ AGENTS.md
 
 .DS_Store
 
+# Portable local runtime state (Robocopy-safe workspace)
+vibe_workspace/
+
 # Alpha Zoo wiki artifacts (generated, not source)
 wiki/alpha-library/manifest.json
 wiki/alpha-library/content/
 bench_report.json
+
+# Local full-repo dump for offline analysis
+PROJECT_BUNDLE_FOR_ANALYSIS.txt
+

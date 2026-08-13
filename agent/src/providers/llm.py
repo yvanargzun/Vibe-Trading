@@ -940,4 +940,13 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
             if custom_ua:
                 headers["User-Agent"] = custom_ua
         kwargs["default_headers"] = headers
-    return ChatOpenAIWithReasoning(**kwargs)
+    llm = ChatOpenAIWithReasoning(**kwargs)
+    # Soft cleanup only — hard Ollama unload is reserved for model switch / run end.
+    try:
+        from src.providers.memory_mgmt import note_model_in_use, release_gpu_memory
+
+        note_model_in_use(name)
+        release_gpu_memory(model_name=name, tag="post_build_llm")
+    except Exception:
+        logger.debug("post-build GPU release skipped", exc_info=True)
+    return llm

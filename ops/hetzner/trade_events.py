@@ -137,7 +137,7 @@ def record_trade_event(
         print(f"TRADE_MARK_FAIL {exc}", flush=True)
     print(f"TRADE_MARK {bot} {kind_mark} {symbol} usd={usd:.2f}", flush=True)
 
-    # Ops/Telegram retro — only on closes when a recommendation is warranted
+    # Ops/Telegram retro + auto-aprendizaje (siempre emite feedback en closes)
     if side == "sell" and bot in ("v6", "binance", None, ""):
         try:
             import strategy_feedback as sf
@@ -278,7 +278,16 @@ def win_rate_today(*, bot: str | None = "v6") -> tuple[float | None, int, int, i
     """Return (win_rate or None, wins, losses, closes_with_result)."""
     wins = losses = rated = 0
     for ev in closes_today(bot=bot):
-        res = ev.get("result")
+        # SYNC vanish/reattach are bookkeeping — exclude from day-edge brake
+        res = str(ev.get("result") or "")
+        reason = str(ev.get("reason") or "")
+        kind = str(ev.get("kind") or "")
+        if (
+            res in ("vanish", "reattach")
+            or kind == "SYNC"
+            or reason.startswith("SYNC")
+        ):
+            continue
         if res == "win":
             wins += 1
             rated += 1

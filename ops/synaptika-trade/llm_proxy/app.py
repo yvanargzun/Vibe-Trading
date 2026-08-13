@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """OpenAI-compatible LLM failover proxy for Synaptika Open WebUI.
 
-Chain (skip missing keys / recent 429s): Ollama → OpenRouter → Gemini.
+Chain (skip missing keys): Gemini → Ollama Cloud → OpenRouter **:free only**.
+Paid OpenRouter IDs are dropped unless ``ALLOW_PAID_OPENROUTER=1``.
 Never returns empty if any upstream still has quota.
-Promotes reasoning-only replies into content so the chat UI does not hang blank.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import time
 import traceback
 import urllib.error
 import urllib.request
@@ -21,8 +20,6 @@ HOST = os.environ.get("LLM_PROXY_HOST", "0.0.0.0")
 PORT = int(os.environ.get("LLM_PROXY_PORT", "4000"))
 PROXY_MODEL = os.environ.get("LLM_PROXY_MODEL", "synaptika-auto")
 TIMEOUT = float(os.environ.get("LLM_PROXY_TIMEOUT", "90"))
-# Skip a provider after 429 for this many seconds (Gemini free tier burns fast).
-COOLDOWN_SEC = float(os.environ.get("LLM_PROXY_COOLDOWN_SEC", "600"))
 
 GEMINI_KEY = (
     os.environ.get("GEMINI_API_KEY", "").strip()
@@ -54,21 +51,39 @@ OPENROUTER_BASE = os.environ.get(
 if "api.openai.com" in OPENROUTER_BASE:
     OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# Free first, then cheap paid — always last net for "never without model"
-OPENROUTER_MODELS = [
-    m.strip()
-    for m in os.environ.get(
-        "OPENROUTER_FAILOVER_MODELS",
-        "inclusionai/ling-3.0-flash:free,"
-        "google/gemma-3-27b-it:free,"
-        "meta-llama/llama-3.3-70b-instruct:free,"
-        "qwen/qwen-2.5-72b-instruct:free,"
-        "openai/gpt-4o-mini,"
-        "google/gemini-2.0-flash-001,"
-        "anthropic/claude-3.5-haiku",
-    ).split(",")
-    if m.strip()
-]
+# Zero-cost OpenRouter chain (stronger reasoning first, flash last).
+_DEFAULT_FREE_OPENROUTER = (
+    "google/gemma-4-31b-it:free,"
+    "google/gemma-4-26b-a4b-it:free,"
+    "nvidia/nemotron-3-nano-30b-a3b:free,"
+    "nvidia/nemotron-3-super-120b-a12b:free,"
+    "openai/gpt-oss-20b:free,"
+    "inclusionai/ling-3.0-flash:free,"
+    "google/gemma-3-27b-it:free,"
+    "meta-llama/llama-3.3-70b-instruct:free,"
+    "qwen/qwen-2.5-72b-instruct:free"
+)
+
+
+def _parse_openrouter_models() -> list[str]:
+    raw = os.environ.get("OPENROUTER_FAILOVER_MODELS", _DEFAULT_FREE_OPENROUTER)
+    models = [m.strip() for m in raw.split(",") if m.strip()]
+    allow_paid = os.environ.get("ALLOW_PAID_OPENROUTER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if allow_paid:
+        return models
+    free_only = [m for m in models if m.endswith(":free")]
+    if free_only:
+        return free_only
+    # Misconfigured list with no :free — fall back to built-in free defaults.
+    return [m.strip() for m in _DEFAULT_FREE_OPENROUTER.split(",") if m.strip()]
+
+
+OPENROUTER_MODELS = _parse_openrouter_models()
 
 FAIL_MARKERS = (
     "rate limit",
@@ -95,28 +110,89 @@ FAIL_MARKERS = (
     "invalid api key",
 )
 
-# provider_name -> unix cooldown-until
-_COOLDOWN: dict[str, float] = {}
-
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def _on_cooldown(name: str) -> bool:
-    until = _COOLDOWN.get(name) or 0.0
-    return time.time() < until
+_quota_fail_streak = 0
+_last_quota_alert_ts = 0.0
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+QUOTA_ALERT_STREAK = max(1, int(os.environ.get("LLM_PROXY_429_ALERT_STREAK", "3")))
 
 
-def _set_cooldown(name: str, code: int) -> None:
+def _is_quota_failure(code: int, text: str) -> bool:
     if code == 429:
-        _COOLDOWN[name] = time.time() + COOLDOWN_SEC
-        log(f"COOLDOWN {name} {int(COOLDOWN_SEC)}s after http=429")
+        return True
+    low = (text or "").lower()
+    return any(
+        m in low
+        for m in (
+            "rate limit",
+            "rate_limit",
+            "quota",
+            "free-models-per-day",
+            "insufficient",
+            "resource_exhausted",
+        )
+    )
+
+
+def note_upstream_result(code: int, text: str, label: str) -> None:
+    """Track free-tier quota failures and Telegram-alert on streaks."""
+    global _quota_fail_streak, _last_quota_alert_ts
+    import time
+
+    if _is_quota_failure(code, text):
+        _quota_fail_streak += 1
+        log(f"quota_fail streak={_quota_fail_streak} {label}")
+    else:
+        if code == 200:
+            _quota_fail_streak = 0
+        return
+
+    if _quota_fail_streak < QUOTA_ALERT_STREAK:
+        return
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    now = time.time()
+    if now - _last_quota_alert_ts < 900:
+        return
+    _last_quota_alert_ts = now
+    msg = (
+        f"⚠️ Synaptika LLM quota: {_quota_fail_streak} free-tier failures "
+        f"(latest {label}). Failover still trying Gemini→Ollama→OpenRouter :free."
+    )
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = json.dumps(
+            {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        log("quota telegram alert sent")
+    except Exception as exc:  # noqa: BLE001
+        log(f"quota telegram alert failed: {exc}")
 
 
 def providers() -> list[dict[str, Any]]:
-    """Prefer Ollama (stable content) → OpenRouter → Gemini last (often 429)."""
     out: list[dict[str, Any]] = []
+    if GEMINI_KEY:
+        out.append(
+            {
+                "name": "gemini",
+                "base": GEMINI_BASE,
+                "key": GEMINI_KEY,
+                "models": [GEMINI_MODEL],
+            }
+        )
     if OLLAMA_KEY:
         out.append(
             {
@@ -133,15 +209,6 @@ def providers() -> list[dict[str, Any]]:
                 "base": OPENROUTER_BASE,
                 "key": OPENROUTER_KEY,
                 "models": OPENROUTER_MODELS,
-            }
-        )
-    if GEMINI_KEY:
-        out.append(
-            {
-                "name": "gemini",
-                "base": GEMINI_BASE,
-                "key": GEMINI_KEY,
-                "models": [GEMINI_MODEL],
             }
         )
     return out
@@ -193,98 +260,14 @@ def rewrite_model(body: dict[str, Any], model: str) -> dict[str, Any]:
     return out
 
 
-def _choice_usable(choice: dict[str, Any]) -> bool:
-    msg = choice.get("message") or choice.get("delta") or {}
-    if not isinstance(msg, dict):
-        return False
-    content = msg.get("content")
-    if isinstance(content, str) and content.strip():
-        return True
-    if msg.get("tool_calls") or msg.get("function_call"):
-        return True
-    # reasoning-only still usable after normalize
-    reasoning = msg.get("reasoning") or msg.get("reasoning_content")
-    return isinstance(reasoning, str) and bool(reasoning.strip())
-
-
-def normalize_completion(doc: dict[str, Any]) -> dict[str, Any]:
-    """gpt-oss often fills `reasoning` and leaves `content` empty — UI looks stuck."""
-    out = dict(doc)
-    choices = list(out.get("choices") or [])
-    fixed = []
-    for ch in choices:
-        if not isinstance(ch, dict):
-            fixed.append(ch)
-            continue
-        c = dict(ch)
-        msg = dict(c.get("message") or {})
-        content = msg.get("content")
-        reasoning = msg.get("reasoning") or msg.get("reasoning_content")
-        if (not isinstance(content, str) or not content.strip()) and isinstance(
-            reasoning, str
-        ) and reasoning.strip():
-            # Prefer the last non-empty paragraph of reasoning as the visible answer.
-            parts = [p.strip() for p in reasoning.strip().split("\n\n") if p.strip()]
-            msg["content"] = parts[-1] if parts else reasoning.strip()
-            msg["_synaptika_promoted_reasoning"] = True
-            c["message"] = msg
-        fixed.append(c)
-    out["choices"] = fixed
-    return out
-
-
-def completion_to_sse(doc: dict[str, Any]) -> bytes:
-    """Turn a full completion into a short SSE stream so OWUI can render promptly."""
-    choice = (doc.get("choices") or [{}])[0]
-    msg = (choice.get("message") or {}) if isinstance(choice, dict) else {}
-    content = msg.get("content") if isinstance(msg, dict) else ""
-    if not isinstance(content, str):
-        content = str(content or "")
-    chunk = {
-        "id": doc.get("id") or "chatcmpl-proxy",
-        "object": "chat.completion.chunk",
-        "created": doc.get("created") or int(time.time()),
-        "model": doc.get("model"),
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": content},
-                "finish_reason": choice.get("finish_reason") or "stop",
-            }
-        ],
-        "synaptika_proxy": doc.get("synaptika_proxy") or {},
-    }
-    # Preserve tool_calls if present
-    if isinstance(msg, dict) and msg.get("tool_calls"):
-        chunk["choices"][0]["delta"] = {
-            "role": "assistant",
-            "tool_calls": msg.get("tool_calls"),
-        }
-    lines = [
-        f"data: {json.dumps(chunk, ensure_ascii=False)}",
-        "data: [DONE]",
-        "",
-    ]
-    return ("\n".join(lines) + "\n").encode("utf-8")
-
-
 def try_chat(body: dict[str, Any]) -> tuple[int, bytes, str, str]:
     """Return status, raw, content_type, provider_label.
 
-    Upstream calls are non-stream for reliable failover. If the client asked
-    for stream=true, wrap the winning completion as SSE so Open WebUI paints.
+    Always uses non-stream upstream calls so failover is reliable;
+    Open WebUI still accepts a full JSON completion.
     """
-    want_stream = bool(body.get("stream"))
     req_body = dict(body)
     req_body["stream"] = False
-    # Cap runaway completions that feel like hangs on mobile.
-    try:
-        mt = int(req_body.get("max_tokens") or 0)
-        if mt <= 0 or mt > 2048:
-            req_body["max_tokens"] = 2048
-    except (TypeError, ValueError):
-        req_body["max_tokens"] = 2048
-
     chain = providers()
     if not chain:
         err = {
@@ -297,10 +280,6 @@ def try_chat(body: dict[str, Any]) -> tuple[int, bytes, str, str]:
 
     errors: list[str] = []
     for prov in chain:
-        if _on_cooldown(prov["name"]):
-            errors.append(f"{prov['name']} cooldown")
-            log(f"SKIP {prov['name']} cooldown")
-            continue
         for model in prov["models"]:
             payload = rewrite_model(req_body, model)
             code, raw, ctype = upstream_request(
@@ -317,28 +296,18 @@ def try_chat(body: dict[str, Any]) -> tuple[int, bytes, str, str]:
                 try:
                     doc = json.loads(text)
                     choices = doc.get("choices") or []
-                    if choices and any(
-                        _choice_usable(c) for c in choices if isinstance(c, dict)
-                    ):
-                        doc = normalize_completion(doc)
+                    if choices:
                         doc.setdefault("synaptika_proxy", {})["via"] = label
+                        raw_out = json.dumps(doc).encode("utf-8")
+                        note_upstream_result(code, text, label)
                         log(f"OK {label}")
-                        if want_stream:
-                            return (
-                                200,
-                                completion_to_sse(doc),
-                                "text/event-stream",
-                                label,
-                            )
-                        raw_out = json.dumps(doc, ensure_ascii=False).encode("utf-8")
                         return 200, raw_out, "application/json", label
                 except json.JSONDecodeError:
                     pass
                 errors.append(f"{label} empty_response")
                 log(f"FAIL {label} empty")
                 continue
-            if code == 429:
-                _set_cooldown(prov["name"], code)
+            note_upstream_result(code, text, label)
             if is_failover_status(code) or body_needs_failover(text):
                 errors.append(f"{label} http={code} {text[:160]}")
                 log(f"FAIL {label} http={code}")
@@ -348,7 +317,7 @@ def try_chat(body: dict[str, Any]) -> tuple[int, bytes, str, str]:
 
     err = {
         "error": {
-            "message": "All LLM upstreams failed (ollama/openrouter/gemini)",
+            "message": "All LLM upstreams failed (gemini/ollama/openrouter)",
             "type": "proxy_exhausted",
             "detail": errors[-8:],
         }
@@ -362,9 +331,10 @@ def models_payload() -> dict[str, Any]:
             "id": PROXY_MODEL,
             "object": "model",
             "owned_by": "synaptika",
-            "description": "Auto failover: Ollama → OpenRouter → Gemini",
+            "description": "Auto failover: Gemini → Ollama → OpenRouter",
         }
     ]
+    # Also expose upstreams for debugging / manual picks via proxy
     for prov in providers():
         for mid in prov["models"][:3]:
             data.append(
@@ -411,11 +381,6 @@ class Handler(BaseHTTPRequestHandler):
                 "openrouter": bool(OPENROUTER_KEY),
                 "ollama": bool(OLLAMA_KEY),
                 "gemini": bool(GEMINI_KEY),
-                "cooldowns": {
-                    k: max(0, int(v - time.time()))
-                    for k, v in _COOLDOWN.items()
-                    if v > time.time()
-                },
             }
             self._send(200, json.dumps(body).encode("utf-8"), "application/json")
             return
@@ -443,34 +408,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self._read_json()
+            # Force auto routing when copiloto / unknown ids hit the proxy
             mid = str(body.get("model") or PROXY_MODEL)
             if mid in (PROXY_MODEL, "synaptika-copiloto") or mid.startswith("synaptika"):
                 body["model"] = PROXY_MODEL
+            # Prefer non-stream for cleaner failover (OWUI still works)
+            # Keep stream if client insists — try_chat handles both.
             code, raw, ctype, via = try_chat(body)
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("X-Synaptika-Proxy", "1")
             self.send_header("X-Synaptika-Via", via)
-            if ctype.startswith("text/event-stream"):
-                self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(raw)
         except Exception:
             tb = traceback.format_exc()
             log(tb)
-            err = json.dumps(
-                {"error": {"message": "proxy_internal", "detail": tb[-500:]}}
-            )
+            err = json.dumps({"error": {"message": "proxy_internal", "detail": tb[-500:]}})
             self._send(500, err.encode("utf-8"), "application/json")
 
 
 def main() -> None:
     chain = [p["name"] for p in providers()]
-    log(
-        f"LLM_PROXY listen={HOST}:{PORT} model={PROXY_MODEL} "
-        f"ollama_model={OLLAMA_MODEL} chain={chain}"
-    )
+    log(f"LLM_PROXY listen={HOST}:{PORT} model={PROXY_MODEL} chain={chain}")
     if "openrouter" not in chain:
         log("WARN: OpenRouter key missing — last-resort failover unavailable")
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)

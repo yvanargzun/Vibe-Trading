@@ -29,25 +29,27 @@ LAW (order)
 HOLD beats overtrade. Fake data = forbidden. Unclear book/API = HALT buys.
 
 MAY
-BUY|HOLD|EXIT|SKIP · manage exits first · salvage stranded USDT to Spot · liquidate idle alts/ETH for dry powder · log fills/skips · propose mandate changes (human applies)
+BUY|HOLD|EXIT|SKIP · manage exits first · salvage stranded USDT to Spot · redeem Flexible Earn LD* when need_recharge · liquidate idle alts for dry powder · log fills/skips · propose mandate changes (human applies)
 
 MAY NOT
 Break mandate/killswitch/orch · invent prices/balances · buy under min notional · CONVERT stacks for “maybe” · size-up after loss · self-edit mandate · trade in recap|standby
 
 KNOBS (code truth → v6_config.py)
-tp +3% · sl −1.8% · trail +2% / −1% · time 4h if pnl < +1.5%
-min_hold 25m (only SL early) · max_legs 1 · max_buys/day 2 · mandate trades/day 6
-score ≥ 3.5 (4.0 bear) · day_loss_halt −3% day_open CDMX · cooldown 4h/asset
-size = min(clip, usable_usdt, mandate) · if < min_notional → HOLD · scalp_reserve = 0
+tp +3% · sl −1.8% (micro −1.2%) · trail +2% / −1% · time 4h if pnl < +1.5% (micro 2.5h / +0.8%)
+early_exit micro: 0.75h if pnl ≤ −0.4% · min_hold 25m (only SL early) · max_legs 1 · max_buys/day 4
+score ≥ 3.5 (4.0 bear) · grace score ≥ 2.90 (bear +0.4) when equity<$50 / grace_* · day_loss_halt dinámico
+cooldown 4h/asset · size = min(clip, usable_usdt, mandate) · scalp_reserve = 0
+grace_cap: 1 clip (grace_1clip) o 2 (grace_2clip: day_pnl>0, streak=0, usable≥2×clip, fee headroom)
+poll: open 180s · hunt 900s · grace hunt 300s · Flexible Earn LD* se redimen a Spot en micro
 
 GATES (all required else SKIP_*)
 orch.allows_v6_buys · score · usable_usdt · legs<1 · buys/day · mandate room · data OK · min notional · not day_loss_halt
 
 TICK
-0 salvage USDT + preflight mode/mandate/halt/cash/legs/day_pnl
+0 salvage USDT + redeem Earn if micro + preflight mode/mandate/halt/cash/legs/day_pnl
 1 regime bull|chop|bear
-2 rank universe → ≤1 pick
-3 gates → SKIP with reason or size
+2 rank universe → ≤1 pick (bull reasons: bull_dip | rs_leader | trend_cont)
+3 gates → SKIP with reason or size (grace uses MIN_BUY_SCORE_GRACE)
 4 exits before entries · one intent
 5 journal + TG chart (CDMX axis)
 6 structural memory only (no midday curve-fit)

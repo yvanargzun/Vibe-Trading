@@ -420,6 +420,21 @@ def format_novice_digest(
         f"- Cambio del dia (mark): {book_sign}${book_pnl:.2f} ({book_pct_sign}{book_pct:.2f}%)",
     ]
     try:
+        mode_doc = json.loads(
+            Path("/root/.vibe-trading/strategy_mode.json").read_text(encoding="utf-8")
+        )
+        m = str(mode_doc.get("mode") or "?")
+        locked = bool(mode_doc.get("locked"))
+        reason = str(mode_doc.get("reason") or "")[:100]
+        lines += [
+            "",
+            "Estrategia Binance",
+            f"- Modo: {m} · {'LOCKED' if locked else 'auto'} · smart-fast-v6",
+            f"- Motivo: {reason or '—'}",
+        ]
+    except Exception:
+        pass
+    try:
         # load autotrade state for goals window
         st_goals = {}
         try:

@@ -342,6 +342,60 @@ def run_worker(
 
     _emit(event_callback, "worker_started", agent_id, task_id)
 
+    try:
+        return _run_worker_body(
+            agent_spec=agent_spec,
+            task=task,
+            upstream_summaries=upstream_summaries,
+            user_vars=user_vars,
+            run_dir=run_dir,
+            event_callback=event_callback,
+            include_shell_tools=include_shell_tools,
+            grounding_block=grounding_block,
+            agent_config=agent_config,
+            agent_id=agent_id,
+            task_id=task_id,
+            max_iterations=max_iterations,
+            timeout=timeout,
+        )
+    finally:
+        # Inactive agent: free VRAM / ask local server to drop weights.
+        try:
+            from src.providers.memory_mgmt import release_gpu_memory
+
+            release_gpu_memory(
+                model_name=agent_spec.model_name,
+                tag=f"worker_done_{agent_id}",
+            )
+        except Exception:
+            logger.debug("worker GPU release skipped", exc_info=True)
+
+
+def _run_worker_body(
+    *,
+    agent_spec: SwarmAgentSpec,
+    task: SwarmTask,
+    upstream_summaries: dict[str, str],
+    user_vars: dict[str, str],
+    run_dir: Path,
+    event_callback: Callable[[SwarmEvent], None] | None,
+    include_shell_tools: bool,
+    grounding_block: str,
+    agent_config: AgentConfig | None,
+    agent_id: str,
+    task_id: str,
+    max_iterations: int,
+    timeout: int,
+) -> WorkerResult:
+    """Inner ReAct loop for :func:`run_worker` (separated for clean finally)."""
+    from src.providers.memory_mgmt import release_on_model_switch
+    from src.swarm.speed import cacheable_tool_names, trim_upstream_summaries
+    from src.swarm.tool_cache import get_run_tool_cache
+
+    upstream_summaries = trim_upstream_summaries(upstream_summaries)
+    tool_cache = get_run_tool_cache(run_dir)
+    cacheable = cacheable_tool_names()
+
     # 1. Build per-worker tool registry — local pool plus any operator-
     #    surfaced MCP tools, projected onto the agent's whitelist.
     registry = build_swarm_registry(
@@ -350,7 +404,8 @@ def run_worker(
         include_shell_tools=include_shell_tools,
     )
 
-    # 2. Create LLM
+    # 2. Create LLM (unload prior model only when the id actually changes)
+    release_on_model_switch(agent_spec.model_name)
     llm = ChatLLM(model_name=agent_spec.model_name)
 
     # 3. Build system prompt with filtered skills
@@ -690,7 +745,19 @@ def run_worker(
                 interval=_HEARTBEAT_INTERVAL_S,
                 emit=_on_heartbeat,
             ):
-                result = registry.execute(tc.name, args)
+                cached = None
+                if tc.name in cacheable:
+                    cached = tool_cache.get(tc.name, args)
+                if cached is not None:
+                    result = cached
+                else:
+                    result = registry.execute(tc.name, args)
+                    if (
+                        tc.name in cacheable
+                        and not _is_error_result(result)
+                        and isinstance(result, str)
+                    ):
+                        tool_cache.put(tc.name, args, result)
             result_is_error = _is_error_result(result)
             if tc.name != "load_skill" and not result_is_error:
                 data_tool_calls += 1

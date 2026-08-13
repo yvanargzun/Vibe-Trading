@@ -1,54 +1,60 @@
 # Open WebUI → Synaptika Ops tools
 
-El chat debe llamar la API read-only de Ops (misma red Docker).
+El chat Ops controla los bots del VPS (Binance live + Alpaca paper) vía API
+de **lectura + escritura**. Cursor no es necesario para operar.
 
 ## Tool Server (OpenAPI)
 
-En Open WebUI → **Admin** → **Settings** → **Tools** (o External Tools):
+`apply_copilot.py` lo cablea solo. Manual (Admin → Settings → Tools):
 
 | Campo | Valor |
 |-------|--------|
-| URL | `http://ops:8787/ops/api/openapi.json` |
-| Auth header | `X-Ops-Key` |
-| Auth value | el mismo `OPS_API_KEY` de `/root/synaptika-trade/secrets.env` |
+| URL | `http://ops:8787` |
+| Path | `/ops/api/openapi.json` |
+| Auth | Bearer `OPS_API_KEY` |
+| ID | `0` (el modelo usa `toolIds: ["server:0"]`) |
 
-Endpoints útiles:
-- `GET /ops/api/digest` — resumen texto ES
-- `GET /ops/api/status` — snapshot completo
-- `GET /ops/api/strategy` — briefs + modo live
-- `GET /ops/api/activity` — ciclos / fills / skips
-- `GET /ops/api/equity` — series de equity
+Write tools: `set_strategy_mode`, `unlock_strategy_mode`, `set_bot_halt`,
+`set_notify_filter`, `set_strategy_knobs`, `enqueue_trade_intent`
+(todas con `confirm=true` tras OK del usuario).
+
+Lectura: `get_bot_digest`, `get_bot_status`, `get_control_status`,
+`get_strategy_briefs`, `get_bot_activity`, `get_equity_history`, `get_win_loss`.
 
 ## System prompt + tools
 
-Deploy aplica automáticamente:
+Deploy (`deploy.sh`) aplica:
+
 1. `apply_free_models.py` — allowlist `:free`
-2. `apply_copilot.py` — modelo **Synaptika Copiloto**, system prompt on-topic, Tool Server Ops
+2. `apply_copilot.py` — modelo **Synaptika Copiloto**, prompt con control,
+   Tool Server Ops, `function_calling=native`, `toolIds=["server:0"]`
+3. restart `open-webui` (recarga cache de tool servers)
 
 Manual:
 
 ```bash
 cd /root/synaptika-trade
 set -a; source secrets.env; set +a
-docker compose --env-file secrets.env exec -T open-webui python3 /srv/webui/apply_free_models.py
+# Actualizar archivos bind-mount IN PLACE (cat >, no cp) para no romper inodes Docker
 docker compose --env-file secrets.env exec -T -e OPS_API_KEY="$OPS_API_KEY" \
   open-webui python3 /srv/webui/apply_copilot.py
 docker compose --env-file secrets.env restart open-webui
 ```
 
-El copiloto **solo** responde sobre bots Binance/Alpaca del VPS; el resto lo rechaza.
-
-Cada turno inyecta el digest live vía filter `synaptika_ops_context` + Tool Server Ops
-(`http://ops:8787` `/ops/api/openapi.json`, Bearer `OPS_API_KEY`).
+El copiloto solo responde sobre bots Binance/Alpaca del VPS; el resto lo rechaza.
+Cada turno inyecta el brief live vía filter `synaptika_ops_context`.
 
 Modelo default: **Synaptika Copiloto**.
 
 ## OpenRouter (solo modelos :free)
 
-`OPENAI_API_KEY` debe ser una key de OpenRouter (`OPENAI_API_BASE_URL=https://openrouter.ai/api/v1`).
+`OPENAI_API_KEY` debe ser una key de OpenRouter
+(`OPENAI_API_BASE_URL=https://openrouter.ai/api/v1`).
 
-Sin créditos de pago, los modelos de pago fallan con respuesta vacía (p. ej. “requires more credits”).
-Por eso el portal restringe la lista a IDs que terminan en `:free`.
+Sin créditos de pago, los modelos de pago fallan con respuesta vacía o generan cargo.
+Por eso el portal restringe la lista a IDs que terminan en `:free`, y el
+`llm-proxy` descarta IDs de pago salvo `ALLOW_PAID_OPENROUTER=1`.
+Orden útil: Gemma-4 → Nemotron → gpt-oss → ling-flash → backups.
 
 Tras cambiar la key o refrescar free models:
 

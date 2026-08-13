@@ -16,7 +16,9 @@ from typing import Any
 HOME = Path("/root/.vibe-trading")
 STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "TUSD", "DAI", "USD"}
 _LAST_SALVAGE_TS = 0.0
+_LAST_EARN_UNLOCK_TS = 0.0
 SALVAGE_COOLDOWN_SEC = 120.0
+EARN_UNLOCK_COOLDOWN_SEC = 300.0
 
 
 def _http_price(asset: str) -> float:
@@ -38,6 +40,93 @@ def spot_balances() -> list[dict[str, Any]]:
     _, cfg, bn = _exchange()
     acc = bn.get_account_snapshot(cfg)
     return list(acc.get("balances", []) or [])
+
+
+def earn_ld_positions() -> list[dict[str, Any]]:
+    """LD* Flexible Earn wrappers visible in the Spot snapshot."""
+    out: list[dict[str, Any]] = []
+    for b in spot_balances():
+        raw = str(b.get("asset") or "")
+        if not raw.startswith("LD") or len(raw) <= 2:
+            continue
+        qty = float(b.get("total") or 0) or (
+            float(b.get("free") or 0) + float(b.get("locked") or 0)
+        )
+        if qty <= 0:
+            continue
+        asset = raw[2:]
+        usd = 0.0
+        try:
+            usd = qty * (1.0 if asset in STABLES else _http_price(asset))
+        except Exception:
+            usd = 0.0
+        out.append({"ld_asset": raw, "asset": asset, "qty": qty, "usd": usd})
+    return out
+
+
+def earn_locked_usd() -> float:
+    return sum(float(p.get("usd") or 0) for p in earn_ld_positions())
+
+
+def flexible_earn_rows() -> list[dict[str, Any]]:
+    try:
+        ex, _, _ = _exchange()
+        data = ex.request("simple-earn/flexible/position", "sapi", "GET", {"size": 100})
+        return list((data or {}).get("rows") or [])
+    except Exception as exc:  # noqa: BLE001
+        print(f"EARN_POS_FAIL {exc}", flush=True)
+        return []
+
+
+def redeem_flexible_asset(asset: str, *, redeem_all: bool = True) -> bool:
+    """Redeem Simple Earn flexible position for ``asset`` back to Spot."""
+    rows = [
+        r
+        for r in flexible_earn_rows()
+        if str(r.get("asset") or "").upper() == asset.upper()
+    ]
+    if not rows:
+        return False
+    row = rows[0]
+    if not row.get("canRedeem", True):
+        print(f"EARN_REDEEM_LOCKED {asset}", flush=True)
+        return False
+    product_id = row.get("productId")
+    avail = float(row.get("totalAmount") or 0)
+    if avail <= 0 or not product_id:
+        return False
+    params: dict[str, Any] = {"productId": product_id}
+    if redeem_all:
+        params["redeemAll"] = True
+    else:
+        params["amount"] = f"{avail:.8f}".rstrip("0").rstrip(".")
+    try:
+        ex, _, _ = _exchange()
+        ex.request("simple-earn/flexible/redeem", "sapi", "POST", params)
+        print(f"EARN_REDEEM_OK {asset} {params}", flush=True)
+        time.sleep(3)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"EARN_REDEEM_FAIL {asset} {exc}", flush=True)
+        return False
+
+
+def redeem_all_flexible_earn(*, force: bool = False) -> list[str]:
+    """Redeem every flexible Earn row. Returns redeemed asset symbols."""
+    global _LAST_EARN_UNLOCK_TS
+    now = time.time()
+    if not force and (now - _LAST_EARN_UNLOCK_TS) < EARN_UNLOCK_COOLDOWN_SEC:
+        return []
+    redeemed: list[str] = []
+    for row in flexible_earn_rows():
+        asset = str(row.get("asset") or "").upper()
+        if not asset:
+            continue
+        if redeem_flexible_asset(asset, redeem_all=True):
+            redeemed.append(asset)
+    if redeemed or force:
+        _LAST_EARN_UNLOCK_TS = now
+    return redeemed
 
 
 def funding_usdt_free() -> float:

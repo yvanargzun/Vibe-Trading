@@ -16,29 +16,36 @@ ENV_PATH = HOME / ".env"
 PREFS_PATH = HOME / "telegram_notify_prefs.json"
 DEDUPE_PATH = HOME / "telegram_send_dedupe.json"
 
-# mode: vibe | scalper | fb | all
-# "both" kept as alias of "all" for older Synaptica clients
+# mode: vibe | scalp15 | fb | all
+# "scalper" kept as alias → scalp15 (ETH scalper removed)
 DEFAULT_MODE = "all"
-VALID_MODES = frozenset({"vibe", "scalper", "fb", "all", "both"})
+VALID_MODES = frozenset({"vibe", "scalp15", "scalper", "fb", "all", "both"})
 DEDUPE_WINDOW_SEC = 90
 
-BTN_VIBE = "Solo Vibe trading"
-BTN_SCALPER = "Solo Scalper"
+BTN_VIBE = "Solo Binance v6"
+BTN_SCALP15 = "Solo Alpaca scalp15"
+BTN_SCALPER = BTN_SCALP15  # legacy alias
 BTN_FB = "Solo clientes FB"
-BTN_ALL = "Todos (Vibe+Scalper+FB)"
+BTN_ALL = "Todos (Binance+Alpaca15+FB)"
 BTN_SALES_TEST = "Probar Messenger sales"
 BTN_SALES_EXIT = "Salir Messenger sales"
 # legacy button text still accepted
 BTN_BOTH_LEGACY = "Ambas (Vibe + FB)"
+BTN_SCALPER_LEGACY = "Solo Scalper"
 
 BUTTON_TO_MODE = {
     BTN_VIBE: "vibe",
-    BTN_SCALPER: "scalper",
+    BTN_SCALP15: "scalp15",
+    BTN_SCALPER_LEGACY: "scalp15",
+    "Solo Vibe trading": "vibe",
+    "Solo Scalper": "scalp15",
+    "Todos (Vibe+Scalper+FB)": "all",
     BTN_FB: "fb",
     BTN_ALL: "all",
     BTN_BOTH_LEGACY: "all",
     "vibe": "vibe",
-    "scalper": "scalper",
+    "scalper": "scalp15",
+    "scalp15": "scalp15",
     "fb": "fb",
     "ambas": "all",
     "both": "all",
@@ -64,7 +71,9 @@ def _normalize_mode(mode: str) -> str:
     mode = (mode or DEFAULT_MODE).lower().strip()
     if mode == "both":
         return "all"
-    if mode in ("vibe", "scalper", "fb", "all"):
+    if mode == "scalper":
+        return "scalp15"
+    if mode in ("vibe", "scalp15", "fb", "all"):
         return mode
     return DEFAULT_MODE
 
@@ -111,17 +120,22 @@ def set_sales_test(enabled: bool) -> dict:
 
 
 def should_notify(channel: str) -> bool:
-    """channel: 'vibe' | 'scalper' | 'fb'.
+    """channel: 'vibe' | 'scalp15' | 'alpaca' | 'fb' (+ legacy 'scalper'→scalp15).
 
-    - vibe: smart-fast-v6 fills + monitor digests
-    - scalper: ETH scalper fills/heartbeat
+    - vibe: Binance smart-fast-v6 fills + digests
+    - scalp15: Alpaca 15m momentum scalper
+    - alpaca: treated as vibe (core Alpaca paper) unless filtered separately later
     - fb: Synaptica client appointments
     """
+    ch = (channel or "").lower().strip()
+    if ch == "scalper":
+        ch = "scalp15"
+    if ch == "alpaca":
+        ch = "vibe"
     # While owner is testing Messenger sales in this chat, hush trading digests.
-    if is_sales_test() and (channel or "").lower() in ("vibe", "scalper"):
+    if is_sales_test() and ch in ("vibe", "scalp15"):
         print("TG_SALES_TEST_SKIP channel=", channel)
         return False
-    ch = (channel or "").lower().strip()
     mode = load_prefs().get("mode") or DEFAULT_MODE
     if mode in ("all", "both"):
         return True
@@ -221,7 +235,7 @@ def filter_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": BTN_VIBE}],
-            [{"text": BTN_SCALPER}],
+            [{"text": BTN_SCALP15}],
             [{"text": BTN_FB}],
             [{"text": BTN_ALL}],
             [{"text": BTN_SALES_TEST}],
@@ -234,9 +248,10 @@ def filter_keyboard() -> dict:
 def mode_label(mode: str) -> str:
     mode = _normalize_mode(mode)
     return {
-        "vibe": "Solo avisos de Vibe trading (smart-fast-v6 + resumen)",
-        "scalper": "Solo avisos del Scalper ETH",
+        "vibe": "Solo avisos Binance v6 (+ Alpaca core digests)",
+        "scalp15": "Solo avisos Alpaca scalp15 (15m)",
+        "scalper": "Solo avisos Alpaca scalp15 (15m)",
         "fb": "Solo avisos de clientes FB / citas",
-        "all": "Todos (Vibe + Scalper + FB)",
-        "both": "Todos (Vibe + Scalper + FB)",
+        "all": "Todos (Binance + Alpaca scalp15 + FB)",
+        "both": "Todos (Binance + Alpaca scalp15 + FB)",
     }.get(mode, mode)
