@@ -1,0 +1,79 @@
+# Synaptika Chat — general Open WebUI
+# Joins synaptika-trade network; HTTPS via trade Caddy (synaptika-chat.duckdns.org)
+services:
+  chat-llm-proxy:
+    build: ./llm_proxy
+    container_name: synaptika-chat-llm-proxy
+    restart: unless-stopped
+    environment:
+      - LLM_PROXY_MODEL=${LLM_PROXY_MODEL:-synaptika-chat-auto}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_FAILOVER_MODELS=${OPENROUTER_FAILOVER_MODELS:-openrouter/free}
+      - ALLOW_PAID_OPENROUTER=${ALLOW_PAID_OPENROUTER:-0}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-flash-latest}
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - GROQ_BASE_URL=${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
+      - LLM_PROXY_TIMEOUT=${LLM_PROXY_TIMEOUT:-60}
+    ports:
+      - "127.0.0.1:4001:4000"
+    networks:
+      - synaptika
+
+  chat-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: synaptika-chat-webui
+    restart: unless-stopped
+    environment:
+      - WEBUI_NAME=Synaptika Chat
+      - WEBUI_URL=https://synaptika-chat.duckdns.org
+      - WEBUI_AUTH=True
+      - ENABLE_SIGNUP=false
+      - ENABLE_LOGIN_FORM=true
+      - ENABLE_WEBSOCKET=true
+      - DEFAULT_USER_ROLE=admin
+      - CORS_ALLOW_ORIGIN=https://synaptika-chat.duckdns.org
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_EVALUATION_ARENA_MODELS=false
+      - ENABLE_IMAGE_GENERATION=false
+      - ENABLE_RAG_HYBRID_SEARCH=false
+      # Web search (news / current events) — free DuckDuckGo, no API key
+      - ENABLE_PERSISTENT_CONFIG=false
+      - ENABLE_WEB_SEARCH=true
+      - WEB_SEARCH_ENGINE=duckduckgo
+      - WEB_SEARCH_RESULT_COUNT=5
+      - WEB_SEARCH_CONCURRENT_REQUESTS=1
+      - BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=true
+      - ENABLE_SEARCH_QUERY_GENERATION=true
+      - RAG_EMBEDDING_ENGINE=
+      - TASK_MODEL=
+      - TASK_MODEL_EXTERNAL=
+      - OPENAI_API_BASE_URL=http://chat-llm-proxy:4000/v1
+      - OPENAI_API_KEY=synaptika-chat-proxy
+      - OPENAI_API_BASE_URLS=http://chat-llm-proxy:4000/v1;${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1};${GROQ_BASE_URL:-https://api.groq.com/openai/v1};${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      - OPENAI_API_KEYS=synaptika-chat-proxy;${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}};${GROQ_API_KEY:-};${GEMINI_API_KEY:-}
+      - DEFAULT_MODELS=${LLM_PROXY_MODEL:-synaptika-chat-auto}
+      - DEFAULT_MODEL_PARAMS={"stream_response":true,"temperature":0.5,"max_tokens":2048,"function_calling":"native"}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-me-synaptika-chat}
+    volumes:
+      - open_webui:/app/backend/data
+      - ./SYSTEM_PROMPT.md:/srv/SYSTEM_PROMPT.md:ro
+      - ./enable_web_search.py:/srv/enable_web_search.py:ro
+      - ./apply_system_prompt.py:/srv/apply_system_prompt.py:ro
+    depends_on:
+      - chat-llm-proxy
+    networks:
+      - synaptika
+
+volumes:
+  open_webui:
+
+networks:
+  synaptika:
+    name: synaptika-trade_default
+    external: true

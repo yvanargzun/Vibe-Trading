@@ -74,3 +74,11 @@ synaptika-trade.duckdns.org:8443 {
 		}
 	}
 }
+
+# synaptika-chat block — general Open WebUI (OpenRouter/Gemini/Groq)
+# Single login via Open WebUI session (no HTTP basic_auth — that re-prompts).
+synaptika-chat.duckdns.org {
+	reverse_proxy synaptika-chat-webui:8080 {
+		flush_interval -1
+	}
+}
