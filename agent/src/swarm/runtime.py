@@ -1,8 +1,8 @@
 """Swarm DAG orchestration runtime.
 
-Core orchestrator: schedules workers by topological layer, parallel within each
-layer and serial between layers. Execution runs in a background daemon thread
-with cancellation and event callback support.
+Core orchestrator: schedules workers by topological layer. Within each layer
+execution is **strictly sequential** (max_workers=1) so only one agent holds
+local LLM / VRAM state at a time — required for low-VRAM hosts.
 """
 
 from __future__ import annotations
@@ -51,24 +51,25 @@ class SwarmRuntime:
 
     Manages the full lifecycle of a swarm run: creation, scheduling, execution,
     and cancellation. Each run executes in an independent background daemon thread;
-    tasks within a layer run in parallel via ThreadPoolExecutor.
+    tasks within a layer run **one at a time** (sequential) to keep VRAM stable.
 
     Attributes:
         _store: SwarmStore persistence layer.
-        _max_workers: Maximum concurrent workers in ThreadPoolExecutor.
+        _max_workers: Forced to 1 for sequential intra-layer execution.
     """
 
     def __init__(
         self,
         store: SwarmStore,
-        max_workers: int = 4,
+        max_workers: int = 1,
         agent_config: AgentConfig | None = None,
     ) -> None:
         """Initialize SwarmRuntime.
 
         Args:
             store: SwarmStore instance for run persistence.
-            max_workers: Maximum concurrent worker threads.
+            max_workers: Ignored for concurrency — clamped to 1 so inactive
+                agents never share VRAM with the active turn.
             agent_config: Optional resolved agent config carrying remote MCP
                 server definitions. Boot-time / operator-trusted; never derived
                 from a swarm caller. Forwarded to every worker on every run so
@@ -77,7 +78,13 @@ class SwarmRuntime:
                 local-tool-only behavior byte-for-byte.
         """
         self._store = store
-        self._max_workers = max_workers
+        # Hard sequential: one worker at a time across the whole swarm.
+        self._max_workers = 1
+        if max_workers != 1:
+            logger.info(
+                "SwarmRuntime forcing max_workers=1 (requested %s) for VRAM safety",
+                max_workers,
+            )
         self._agent_config = agent_config
         self._cancel_events: dict[str, threading.Event] = {}
         self._live_callbacks: dict[str, Callable] = {}
@@ -222,7 +229,7 @@ class SwarmRuntime:
             3. Compute topological layers
             4. For each layer:
                a. Check cancellation
-               b. Submit all tasks to ThreadPoolExecutor
+               b. Submit tasks sequentially (max_workers=1) to ThreadPoolExecutor
                c. Collect results, resolve dependencies, update store
             5. Update run status to completed/failed
 
@@ -280,7 +287,7 @@ class SwarmRuntime:
                     ),
                 )
 
-                # Execute all tasks in this layer in parallel
+                # Execute all tasks in this layer sequentially (VRAM-safe).
                 layer_results = self._execute_layer(
                     run=run,
                     task_store=task_store,
@@ -474,10 +481,12 @@ class SwarmRuntime:
         include_shell_tools: bool = False,
         grounding_block: str = "",
     ) -> dict[str, WorkerResult]:
-        """Execute all tasks in a single layer in parallel, with retry on failure.
+        """Execute all tasks in a single layer **sequentially**, with retry on failure.
 
-        Each task is retried up to agent_spec.max_retries times if the worker
-        returns status="failed". A "task_retry" event is emitted before each retry.
+        Concurrency is forced to one worker so inactive agents release VRAM /
+        KV-cache before the next task starts. Each task is still retried up to
+        agent_spec.max_retries times if the worker returns status="failed".
+        A "task_retry" event is emitted before each retry.
 
         Args:
             run: The SwarmRun being executed.
@@ -705,6 +714,16 @@ class SwarmRuntime:
                 grounding_block=grounding_block,
                 agent_config=self._agent_config,
             )
+            # Between retries / after the final attempt: drop idle agent tensors.
+            try:
+                from src.providers.memory_mgmt import release_gpu_memory
+
+                release_gpu_memory(
+                    model_name=agent_spec.model_name,
+                    tag=f"post_worker_{agent_spec.id}",
+                )
+            except Exception:
+                logger.debug("post-worker GPU release skipped", exc_info=True)
 
             cumulative_input_tokens += result.input_tokens
             cumulative_output_tokens += result.output_tokens

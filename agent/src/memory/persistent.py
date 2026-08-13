@@ -18,7 +18,17 @@ from src.agent.frontmatter import parse_frontmatter as _parse_frontmatter
 
 logger = logging.getLogger(__name__)
 
-MEMORY_BASE = Path.home() / ".vibe-trading" / "memory"
+MEMORY_BASE = None  # resolved lazily via get_memory_base()
+
+
+def get_memory_base() -> Path:
+    """Return portable persistent-memory root under ``vibe_workspace/memory``."""
+    from src.config.paths import get_runtime_root
+
+    base = get_runtime_root() / "memory"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
 MAX_INDEX_LINES = 200
 MAX_ENTRY_CHARS = 8000
 MAX_RESULTS = 5
@@ -197,7 +207,7 @@ class PersistentMemory:
     """File-based persistent memory that survives across sessions."""
 
     def __init__(self, memory_dir: Optional[Path] = None) -> None:
-        self._dir = memory_dir or MEMORY_BASE
+        self._dir = memory_dir or get_memory_base()
         self._dir.mkdir(parents=True, exist_ok=True)
         self._index_path = self._dir / "MEMORY.md"
         self._snapshot: str = ""

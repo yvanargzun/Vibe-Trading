@@ -1,7 +1,7 @@
-"""User-level state directory resolution (issue #904).
+"""Portable runtime root resolution (``vibe_workspace/`` under project).
 
-Session/run/upload history must live under the runtime root
-(``~/.vibe-trading`` by default), never relative to the installed code.
+Session/run/upload history lives under the project-local workspace so the tree
+can be Robocopy'd without depending on ``~/.vibe-trading``.
 """
 
 from __future__ import annotations
@@ -10,46 +10,38 @@ from pathlib import Path
 
 import pytest
 
-from src.config.paths import get_runtime_root
+from src.config.paths import get_project_anchor, get_runtime_root
 
 
-def test_runtime_root_defaults_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("VIBE_TRADING_HOME", raising=False)
+def _patch_runtime_root(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Point all path helpers at ``root`` without using host env vars."""
+    from src.config import paths as pathmod
 
-    assert get_runtime_root() == Path.home() / ".vibe-trading"
+    root.mkdir(parents=True, exist_ok=True)
+
+    def _root(config_path: Path | None = None) -> Path:
+        if config_path is not None:
+            return Path(config_path).expanduser().resolve().parent
+        return root
+
+    monkeypatch.setattr(pathmod, "get_runtime_root", _root)
+    # Callers that imported the symbol by name also need the patch.
+    monkeypatch.setattr("src.config.paths.get_runtime_root", _root)
 
 
-def test_runtime_root_honors_env_override(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(tmp_path / "custom-root"))
-
-    assert get_runtime_root() == tmp_path / "custom-root"
-
-
-def test_runtime_root_expands_user_in_env_override(
+def test_runtime_root_defaults_to_project_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VIBE_TRADING_HOME", "~/elsewhere")
+    monkeypatch.delenv("VIBE_TRADING_HOME", raising=False)
 
-    assert get_runtime_root() == Path.home() / "elsewhere"
+    assert get_runtime_root() == get_project_anchor() / "vibe_workspace"
+    assert get_runtime_root().is_dir()
 
 
-def test_explicit_config_path_beats_env_override(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(tmp_path / "custom-root"))
+def test_explicit_config_path_beats_default(tmp_path: Path) -> None:
     config_path = tmp_path / "explicit" / "agent.json"
 
     assert get_runtime_root(config_path) == config_path.parent
-
-
-def test_home_override_rejects_unc_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Match the UNC hardening every other root-widening env var enforces."""
-    for unc in ("//server/share", r"\\server\share"):
-        monkeypatch.setenv("VIBE_TRADING_HOME", unc)
-        with pytest.raises(ValueError, match="UNC"):
-            get_runtime_root()
 
 
 def test_legacy_swarm_runs_kept_in_run_root_allowlist() -> None:
@@ -65,6 +57,9 @@ def test_state_dir_helpers_live_under_runtime_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from src.config.paths import (
+        get_data_dir,
+        get_kv_cache_dir,
+        get_logs_dir,
         get_runs_dir,
         get_sessions_dir,
         get_swarm_runs_dir,
@@ -72,12 +67,24 @@ def test_state_dir_helpers_live_under_runtime_root(
     )
 
     root = tmp_path / "state-root"
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(root))
+    _patch_runtime_root(monkeypatch, root)
 
     assert get_sessions_dir() == root / "sessions"
     assert get_runs_dir() == root / "runs"
     assert get_swarm_runs_dir() == root / "swarm" / "runs"
     assert get_uploads_dir() == root / "uploads"
+    assert get_data_dir() == root / "data"
+    assert get_logs_dir() == root / "logs"
+    assert get_kv_cache_dir() == root / "kv_cache"
+
+
+def test_atomic_write_text_roundtrip(tmp_path: Path) -> None:
+    from src.config.paths import atomic_write_text
+
+    target = tmp_path / "nested" / "state.json"
+    atomic_write_text(target, '{"ok": true}\n')
+    assert target.read_text(encoding="utf-8") == '{"ok": true}\n'
+    assert not list(tmp_path.rglob("*.tmp"))
 
 
 def test_legacy_cli_constants_derive_from_runtime_root() -> None:
@@ -123,6 +130,7 @@ def test_api_swarm_runtime_uses_swarm_runs_root(
     runtime = swarm_routes._get_swarm_runtime()
 
     assert runtime._store.base_dir == swarm_runs_root()
+    assert runtime._max_workers == 1
 
 
 def test_swarm_runs_root_derives_from_runtime_root() -> None:
@@ -138,7 +146,7 @@ def test_trace_lookup_searches_runtime_root(
     from src.agent.trace import TraceWriter
 
     root = tmp_path / "state-root"
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(root))
+    _patch_runtime_root(monkeypatch, root)
     trace_dir = root / "sessions" / "sess-1"
     trace_dir.mkdir(parents=True)
     (trace_dir / "trace.jsonl").write_text("", encoding="utf-8")
@@ -152,7 +160,7 @@ def test_upload_handle_resolves_to_runtime_uploads_dir(
     from src.tools.path_utils import _import_candidate
 
     root = tmp_path / "state-root"
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(root))
+    _patch_runtime_root(monkeypatch, root)
 
     assert _import_candidate("uploads/report.pdf") == root / "uploads" / "report.pdf"
     assert (
@@ -161,13 +169,13 @@ def test_upload_handle_resolves_to_runtime_uploads_dir(
     )
 
 
-def test_sandbox_roots_follow_home_override(
+def test_sandbox_roots_follow_runtime_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from src.tools.path_utils import allowed_file_roots, allowed_write_roots
 
     root = tmp_path / "state-root"
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(root))
+    _patch_runtime_root(monkeypatch, root)
 
     file_roots = allowed_file_roots()
     write_roots = allowed_write_roots()
@@ -178,7 +186,7 @@ def test_sandbox_roots_follow_home_override(
     assert (root / "runs").resolve() in write_roots
 
 
-def test_sessions_db_and_goal_db_follow_home_override(
+def test_sessions_db_and_goal_db_follow_runtime_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The FTS index and goal store must live beside the sessions they index."""
@@ -188,30 +196,27 @@ def test_sessions_db_and_goal_db_follow_home_override(
     from src.session import search
 
     root = tmp_path / "state-root"
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(root))
+    _patch_runtime_root(monkeypatch, root)
     try:
         assert importlib.reload(search)._DB_PATH == root / "sessions.db"
         assert (
             importlib.reload(goal_store)._DEFAULT_DB_PATH == root / "sessions.db"
         )
     finally:
-        monkeypatch.delenv("VIBE_TRADING_HOME")
         importlib.reload(search)
         importlib.reload(goal_store)
 
 
-def test_banner_session_probe_follows_home_override(
+def test_banner_session_probe_follows_runtime_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import sqlite3
-
     import importlib
+    import sqlite3
 
     cli_main = importlib.import_module("cli.main")
 
     root = tmp_path / "state-root"
-    root.mkdir()
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(root))
+    _patch_runtime_root(monkeypatch, root)
     with sqlite3.connect(str(root / "sessions.db")) as conn:
         conn.execute("CREATE TABLE sessions (id TEXT)")
         conn.execute("INSERT INTO sessions VALUES ('a'), ('b')")
@@ -234,15 +239,16 @@ def test_welcome_panel_reports_runtime_root_as_workspace(
     assert "/RTROOT" in console.export_text()
 
 
-def test_state_dir_helpers_do_not_create_directories(
+def test_state_dir_helpers_create_portable_directories(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Portable mode eagerly creates workspace dirs so sync tools see them."""
     from src.config.paths import get_runs_dir, get_sessions_dir
 
     root = tmp_path / "state-root"
-    monkeypatch.setenv("VIBE_TRADING_HOME", str(root))
+    _patch_runtime_root(monkeypatch, root)
 
-    get_sessions_dir()
-    get_runs_dir()
-
-    assert not root.exists()
+    assert get_sessions_dir() == root / "sessions"
+    assert get_runs_dir() == root / "runs"
+    assert (root / "sessions").is_dir()
+    assert (root / "runs").is_dir()

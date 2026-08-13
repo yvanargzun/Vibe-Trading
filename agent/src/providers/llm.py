@@ -940,4 +940,13 @@ def build_llm(*, model_name: Optional[str] = None, callbacks: Any = None) -> Any
             if custom_ua:
                 headers["User-Agent"] = custom_ua
         kwargs["default_headers"] = headers
-    return ChatOpenAIWithReasoning(**kwargs)
+    llm = ChatOpenAIWithReasoning(**kwargs)
+    # Local/low-VRAM: ensure any prior resident weights are not held after factory
+    # construction when switching models between sequential swarm agents.
+    try:
+        from src.providers.memory_mgmt import release_gpu_memory
+
+        release_gpu_memory(model_name=name, tag="post_build_llm")
+    except Exception:
+        logger.debug("post-build GPU release skipped", exc_info=True)
+    return llm

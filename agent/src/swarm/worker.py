@@ -342,6 +342,52 @@ def run_worker(
 
     _emit(event_callback, "worker_started", agent_id, task_id)
 
+    try:
+        return _run_worker_body(
+            agent_spec=agent_spec,
+            task=task,
+            upstream_summaries=upstream_summaries,
+            user_vars=user_vars,
+            run_dir=run_dir,
+            event_callback=event_callback,
+            include_shell_tools=include_shell_tools,
+            grounding_block=grounding_block,
+            agent_config=agent_config,
+            agent_id=agent_id,
+            task_id=task_id,
+            max_iterations=max_iterations,
+            timeout=timeout,
+        )
+    finally:
+        # Inactive agent: free VRAM / ask local server to drop weights.
+        try:
+            from src.providers.memory_mgmt import release_gpu_memory
+
+            release_gpu_memory(
+                model_name=agent_spec.model_name,
+                tag=f"worker_done_{agent_id}",
+            )
+        except Exception:
+            logger.debug("worker GPU release skipped", exc_info=True)
+
+
+def _run_worker_body(
+    *,
+    agent_spec: SwarmAgentSpec,
+    task: SwarmTask,
+    upstream_summaries: dict[str, str],
+    user_vars: dict[str, str],
+    run_dir: Path,
+    event_callback: Callable[[SwarmEvent], None] | None,
+    include_shell_tools: bool,
+    grounding_block: str,
+    agent_config: AgentConfig | None,
+    agent_id: str,
+    task_id: str,
+    max_iterations: int,
+    timeout: int,
+) -> WorkerResult:
+    """Inner ReAct loop for :func:`run_worker` (separated for clean finally)."""
     # 1. Build per-worker tool registry — local pool plus any operator-
     #    surfaced MCP tools, projected onto the agent's whitelist.
     registry = build_swarm_registry(

@@ -287,8 +287,16 @@ class ChatLLM:
         """
         llm = self._llm.bind_tools(tools) if tools else self._llm
         config = {"timeout": timeout} if timeout else {}
-        ai_message = llm.invoke(messages, config=config)
-        return self._parse_response(ai_message)
+        try:
+            ai_message = llm.invoke(messages, config=config)
+            return self._parse_response(ai_message)
+        finally:
+            try:
+                from src.providers.memory_mgmt import release_gpu_memory
+
+                release_gpu_memory(model_name=self.model_name, tag="post_chat")
+            except Exception:
+                pass
 
     def stream_chat(
         self,
@@ -373,6 +381,13 @@ class ChatLLM:
             provider = _cfg.llm.langchain_provider.strip().lower() or "openai"
             model = self.model_name or _cfg.llm.langchain_model_name.strip() or "(unset)"
             raise ProviderStreamError(provider=provider, model=model, original=exc) from exc
+        finally:
+            try:
+                from src.providers.memory_mgmt import release_gpu_memory
+
+                release_gpu_memory(model_name=self.model_name, tag="post_stream")
+            except Exception:
+                pass
 
     @staticmethod
     def _tool_call_thought_signature_maps(ai_message: Any) -> tuple[dict[str, str], dict[int, str]]:
