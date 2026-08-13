@@ -42,6 +42,8 @@ OLLAMA_DEFAULT_MODEL=deepseek-v4-flash
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.0-flash
 LLM_PROXY_MODEL=synaptika-auto
+ALLOW_PAID_OPENROUTER=0
+OPENROUTER_FAILOVER_MODELS=google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-nano-30b-a3b:free,nvidia/nemotron-3-super-120b-a12b:free,openai/gpt-oss-20b:free,inclusionai/ling-3.0-flash:free,google/gemma-3-27b-it:free,meta-llama/llama-3.3-70b-instruct:free,qwen/qwen-2.5-72b-instruct:free
 EOF
   chmod 600 "$DEST/secrets.env"
 fi
@@ -59,9 +61,17 @@ ensure_kv OLLAMA_CLOUD_BASE_URL "https://ollama.com/v1"
 ensure_kv OLLAMA_DEFAULT_MODEL "deepseek-v4-flash"
 ensure_kv GEMINI_MODEL "gemini-2.0-flash"
 ensure_kv LLM_PROXY_MODEL "synaptika-auto"
+ensure_kv ALLOW_PAID_OPENROUTER "0"
+ensure_kv OPENROUTER_FAILOVER_MODELS "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-3-nano-30b-a3b:free,nvidia/nemotron-3-super-120b-a12b:free,openai/gpt-oss-20b:free,inclusionai/ling-3.0-flash:free,google/gemma-3-27b-it:free,meta-llama/llama-3.3-70b-instruct:free,qwen/qwen-2.5-72b-instruct:free"
 # Prefer real OpenRouter base if older template pointed at api.openai.com
 if grep -q '^OPENAI_API_BASE_URL=https://api.openai.com' "$DEST/secrets.env" 2>/dev/null; then
   sed -i 's#^OPENAI_API_BASE_URL=https://api.openai.com/v1#OPENAI_API_BASE_URL=https://openrouter.ai/api/v1#' "$DEST/secrets.env"
+fi
+# Strip legacy paid OpenRouter failover IDs unless operator opted in
+if ! grep -qE '^ALLOW_PAID_OPENROUTER=(1|true|yes|on)$' "$DEST/secrets.env" 2>/dev/null; then
+  if grep -qE 'openai/gpt-4o-mini|claude-3.5-haiku|gemini-2.0-flash-001' "$DEST/secrets.env" 2>/dev/null; then
+    sed -i 's/^OPENROUTER_FAILOVER_MODELS=.*/OPENROUTER_FAILOVER_MODELS=google\/gemma-4-31b-it:free,google\/gemma-4-26b-a4b-it:free,nvidia\/nemotron-3-nano-30b-a3b:free,nvidia\/nemotron-3-super-120b-a12b:free,openai\/gpt-oss-20b:free,inclusionai\/ling-3.0-flash:free,google\/gemma-3-27b-it:free,meta-llama\/llama-3.3-70b-instruct:free,qwen\/qwen-2.5-72b-instruct:free/' "$DEST/secrets.env" || true
+  fi
 fi
 # Import GEMINI / OPENROUTER from trading env if portal secrets are empty
 for AGENT_ENV in /root/.vibe-trading/agent.env /root/.vibe-trading/.env; do
@@ -133,6 +143,7 @@ set +a
 export LETSENCRYPT_EMAIL OPS_PASSWORD OPS_API_KEY OPENAI_API_KEY OPENAI_API_BASE_URL
 export OLLAMA_API_KEY OLLAMA_CLOUD_BASE_URL OLLAMA_DEFAULT_MODEL
 export OPENROUTER_API_KEY OPENROUTER_BASE_URL GEMINI_API_KEY GEMINI_MODEL LLM_PROXY_MODEL
+export OPENROUTER_FAILOVER_MODELS ALLOW_PAID_OPENROUTER
 
 cd "$DEST"
 ln -sfn secrets.env .env

@@ -104,7 +104,7 @@ def load_fallback() -> list[str]:
         return [m for m in models if isinstance(m, str) and m.endswith(":free")]
     except Exception as exc:  # noqa: BLE001
         print(f"fallback load failed: {exc}", file=sys.stderr)
-        return ["inclusionai/ling-3.0-flash:free"]
+        return ["google/gemma-4-31b-it:free", "inclusionai/ling-3.0-flash:free"]
 
 
 def upsert(cur: sqlite3.Cursor, key: str, value) -> None:

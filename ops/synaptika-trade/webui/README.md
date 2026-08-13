@@ -51,8 +51,10 @@ Modelo default: **Synaptika Copiloto**.
 `OPENAI_API_KEY` debe ser una key de OpenRouter
 (`OPENAI_API_BASE_URL=https://openrouter.ai/api/v1`).
 
-Sin créditos de pago, los modelos de pago fallan con respuesta vacía.
-Por eso el portal restringe la lista a IDs que terminan en `:free`.
+Sin créditos de pago, los modelos de pago fallan con respuesta vacía o generan cargo.
+Por eso el portal restringe la lista a IDs que terminan en `:free`, y el
+`llm-proxy` descarta IDs de pago salvo `ALLOW_PAID_OPENROUTER=1`.
+Orden útil: Gemma-4 → Nemotron → gpt-oss → ling-flash → backups.
 
 Tras cambiar la key o refrescar free models:
 

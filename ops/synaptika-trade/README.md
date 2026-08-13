@@ -22,8 +22,9 @@ OPENAI_API_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 El chat solo lista modelos OpenRouter con sufijo `:free` (sin créditos de pago).
-Default: `inclusionai/ling-3.0-flash:free`. Tras deploy corre
-`webui/apply_free_models.py` para fijar la allowlist en la DB de Open WebUI.
+Default copiloto: `synaptika-auto` (Gemini → Ollama Cloud → OpenRouter `:free`).
+Failover OpenRouter prioriza Gemma-4 / Nemotron free; **no** usa gpt-4o-mini/Haiku salvo
+`ALLOW_PAID_OPENROUTER=1`. Tras deploy corre `webui/apply_free_models.py`.
 
 
 Symlink: `ln -sfn secrets.env .env`

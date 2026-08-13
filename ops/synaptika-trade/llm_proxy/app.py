@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """OpenAI-compatible LLM failover proxy for Synaptika Open WebUI.
 
-Chain (skip missing keys): Gemini → Ollama Cloud → OpenRouter (free then paid).
+Chain (skip missing keys): Gemini → Ollama Cloud → OpenRouter **:free only**.
+Paid OpenRouter IDs are dropped unless ``ALLOW_PAID_OPENROUTER=1``.
 Never returns empty if any upstream still has quota.
 """
 
@@ -50,21 +51,39 @@ OPENROUTER_BASE = os.environ.get(
 if "api.openai.com" in OPENROUTER_BASE:
     OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# Free first, then cheap paid — always last net for "never without model"
-OPENROUTER_MODELS = [
-    m.strip()
-    for m in os.environ.get(
-        "OPENROUTER_FAILOVER_MODELS",
-        "inclusionai/ling-3.0-flash:free,"
-        "google/gemma-3-27b-it:free,"
-        "meta-llama/llama-3.3-70b-instruct:free,"
-        "qwen/qwen-2.5-72b-instruct:free,"
-        "openai/gpt-4o-mini,"
-        "google/gemini-2.0-flash-001,"
-        "anthropic/claude-3.5-haiku",
-    ).split(",")
-    if m.strip()
-]
+# Zero-cost OpenRouter chain (stronger reasoning first, flash last).
+_DEFAULT_FREE_OPENROUTER = (
+    "google/gemma-4-31b-it:free,"
+    "google/gemma-4-26b-a4b-it:free,"
+    "nvidia/nemotron-3-nano-30b-a3b:free,"
+    "nvidia/nemotron-3-super-120b-a12b:free,"
+    "openai/gpt-oss-20b:free,"
+    "inclusionai/ling-3.0-flash:free,"
+    "google/gemma-3-27b-it:free,"
+    "meta-llama/llama-3.3-70b-instruct:free,"
+    "qwen/qwen-2.5-72b-instruct:free"
+)
+
+
+def _parse_openrouter_models() -> list[str]:
+    raw = os.environ.get("OPENROUTER_FAILOVER_MODELS", _DEFAULT_FREE_OPENROUTER)
+    models = [m.strip() for m in raw.split(",") if m.strip()]
+    allow_paid = os.environ.get("ALLOW_PAID_OPENROUTER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if allow_paid:
+        return models
+    free_only = [m for m in models if m.endswith(":free")]
+    if free_only:
+        return free_only
+    # Misconfigured list with no :free — fall back to built-in free defaults.
+    return [m.strip() for m in _DEFAULT_FREE_OPENROUTER.split(",") if m.strip()]
+
+
+OPENROUTER_MODELS = _parse_openrouter_models()
 
 FAIL_MARKERS = (
     "rate limit",
