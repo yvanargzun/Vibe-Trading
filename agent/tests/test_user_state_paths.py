@@ -130,7 +130,12 @@ def test_api_swarm_runtime_uses_swarm_runs_root(
     runtime = swarm_routes._get_swarm_runtime()
 
     assert runtime._store.base_dir == swarm_runs_root()
-    assert runtime._max_workers == 1
+    from src.config.accessor import get_env_config
+    from src.swarm.speed import resolve_max_workers
+
+    assert runtime._max_workers == resolve_max_workers(
+        get_env_config().swarm.swarm_max_workers
+    )
 
 
 def test_swarm_runs_root_derives_from_runtime_root() -> None:

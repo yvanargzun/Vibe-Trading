@@ -388,6 +388,14 @@ def _run_worker_body(
     timeout: int,
 ) -> WorkerResult:
     """Inner ReAct loop for :func:`run_worker` (separated for clean finally)."""
+    from src.providers.memory_mgmt import release_on_model_switch
+    from src.swarm.speed import cacheable_tool_names, trim_upstream_summaries
+    from src.swarm.tool_cache import get_run_tool_cache
+
+    upstream_summaries = trim_upstream_summaries(upstream_summaries)
+    tool_cache = get_run_tool_cache(run_dir)
+    cacheable = cacheable_tool_names()
+
     # 1. Build per-worker tool registry — local pool plus any operator-
     #    surfaced MCP tools, projected onto the agent's whitelist.
     registry = build_swarm_registry(
@@ -396,7 +404,8 @@ def _run_worker_body(
         include_shell_tools=include_shell_tools,
     )
 
-    # 2. Create LLM
+    # 2. Create LLM (unload prior model only when the id actually changes)
+    release_on_model_switch(agent_spec.model_name)
     llm = ChatLLM(model_name=agent_spec.model_name)
 
     # 3. Build system prompt with filtered skills
@@ -736,7 +745,19 @@ def _run_worker_body(
                 interval=_HEARTBEAT_INTERVAL_S,
                 emit=_on_heartbeat,
             ):
-                result = registry.execute(tc.name, args)
+                cached = None
+                if tc.name in cacheable:
+                    cached = tool_cache.get(tc.name, args)
+                if cached is not None:
+                    result = cached
+                else:
+                    result = registry.execute(tc.name, args)
+                    if (
+                        tc.name in cacheable
+                        and not _is_error_result(result)
+                        and isinstance(result, str)
+                    ):
+                        tool_cache.put(tc.name, args, result)
             result_is_error = _is_error_result(result)
             if tc.name != "load_skill" and not result_is_error:
                 data_tool_calls += 1

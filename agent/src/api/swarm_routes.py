@@ -31,7 +31,13 @@ def _get_swarm_runtime():
     # Boot-time / operator-trusted: REST API callers cannot influence the
     # config path. See docs/2026-05-25_swarm_mcp_tools_roadmap.md.
     agent_config = load_swarm_agent_config()
-    _swarm_runtime = SwarmRuntime(store=store, agent_config=agent_config)
+    from src.config.accessor import get_env_config
+
+    _swarm_runtime = SwarmRuntime(
+        store=store,
+        max_workers=get_env_config().swarm.swarm_max_workers,
+        agent_config=agent_config,
+    )
     return _swarm_runtime
 
 

@@ -1,8 +1,8 @@
 """Swarm DAG orchestration runtime.
 
-Core orchestrator: schedules workers by topological layer. Within each layer
-execution is **strictly sequential** (max_workers=1) so only one agent holds
-local LLM / VRAM state at a time — required for low-VRAM hosts.
+Core orchestrator: schedules workers by topological layer. Intra-layer
+concurrency follows ``SWARM_VRAM_MODE`` (see ``src.swarm.speed``): local
+providers stay sequential by default; remote providers may run in parallel.
 """
 
 from __future__ import annotations
@@ -51,25 +51,26 @@ class SwarmRuntime:
 
     Manages the full lifecycle of a swarm run: creation, scheduling, execution,
     and cancellation. Each run executes in an independent background daemon thread;
-    tasks within a layer run **one at a time** (sequential) to keep VRAM stable.
+    same-layer tasks may run in parallel when the VRAM/speed policy allows.
 
     Attributes:
         _store: SwarmStore persistence layer.
-        _max_workers: Forced to 1 for sequential intra-layer execution.
+        _max_workers: Effective intra-layer concurrency after speed policy.
     """
 
     def __init__(
         self,
         store: SwarmStore,
-        max_workers: int = 1,
+        max_workers: int | None = None,
         agent_config: AgentConfig | None = None,
     ) -> None:
         """Initialize SwarmRuntime.
 
         Args:
             store: SwarmStore instance for run persistence.
-            max_workers: Ignored for concurrency — clamped to 1 so inactive
-                agents never share VRAM with the active turn.
+            max_workers: Requested concurrency hint (usually ``SWARM_MAX_WORKERS``).
+                Resolved through ``resolve_max_workers`` for hybrid local/remote
+                and ``SWARM_VRAM_MODE`` policy. ``None`` reads env defaults.
             agent_config: Optional resolved agent config carrying remote MCP
                 server definitions. Boot-time / operator-trusted; never derived
                 from a swarm caller. Forwarded to every worker on every run so
@@ -77,13 +78,26 @@ class SwarmRuntime:
                 tools. ``None`` (the default) preserves the current
                 local-tool-only behavior byte-for-byte.
         """
+        from src.providers.memory_mgmt import set_vram_policy
+        from src.swarm.speed import get_vram_mode, resolve_max_workers
+
         self._store = store
-        # Hard sequential: one worker at a time across the whole swarm.
-        self._max_workers = 1
-        if max_workers != 1:
+        requested = 4 if max_workers is None else max_workers
+        self._max_workers = resolve_max_workers(requested)
+        mode = get_vram_mode()
+        set_vram_policy(mode)
+        if self._max_workers != requested:
             logger.info(
-                "SwarmRuntime forcing max_workers=1 (requested %s) for VRAM safety",
-                max_workers,
+                "SwarmRuntime max_workers=%s (requested %s, mode=%s)",
+                self._max_workers,
+                requested,
+                mode,
+            )
+        else:
+            logger.info(
+                "SwarmRuntime max_workers=%s (mode=%s)",
+                self._max_workers,
+                mode,
             )
         self._agent_config = agent_config
         self._cancel_events: dict[str, threading.Event] = {}
@@ -229,9 +243,10 @@ class SwarmRuntime:
             3. Compute topological layers
             4. For each layer:
                a. Check cancellation
-               b. Submit tasks sequentially (max_workers=1) to ThreadPoolExecutor
+               b. Submit ready tasks (concurrency from speed policy)
                c. Collect results, resolve dependencies, update store
             5. Update run status to completed/failed
+            6. Hard-release local GPU/Ollama residency
 
         Args:
             run: SwarmRun to execute.
@@ -245,12 +260,26 @@ class SwarmRuntime:
         # specs may be stale if operator edited mcp_servers config between runs.
         invalidate_mcp_specs_cache()
 
+        from src.providers.memory_mgmt import release_at_run_end, set_vram_policy
+        from src.swarm.speed import apply_speed_model_overrides, get_vram_mode
+
+        set_vram_policy(get_vram_mode())
+        apply_speed_model_overrides(run)
+
         # Mark as running
         run.status = RunStatus.running
         self._store.update_run(run)
         self._emit_event(run_id, self._make_event("run_started"))
 
-        self._prefetch_grounding_data(run)
+        # Warm tool-cache dir + grounding in parallel with first-layer prep.
+        prep_pool = ThreadPoolExecutor(max_workers=2)
+        try:
+            grounding_future = prep_pool.submit(self._prefetch_grounding_data, run)
+            cache_future = prep_pool.submit(self._ensure_tool_cache_dir, run_dir)
+            grounding_future.result()
+            cache_future.result()
+        finally:
+            prep_pool.shutdown(wait=False, cancel_futures=True)
 
         # Initialize task store
         task_store = TaskStore(run_dir)
@@ -287,7 +316,6 @@ class SwarmRuntime:
                     ),
                 )
 
-                # Execute all tasks in this layer sequentially (VRAM-safe).
                 layer_results = self._execute_layer(
                     run=run,
                     task_store=task_store,
@@ -368,6 +396,11 @@ class SwarmRuntime:
                 # without per-task I/O spam. One write per layer is cheap.
                 self._sync_run_tasks_snapshot(run, task_store)
 
+                # I/O overlap: prepare next-layer artifact dirs while we still
+                # hold the GIL-light path before the next LLM-heavy layer.
+                if layer_idx + 1 < len(layers):
+                    self._ensure_artifact_dirs(run_dir, agent_map, layers[layer_idx + 1])
+
         except Exception as exc:
             logger.error("Run %s failed with exception", run_id, exc_info=True)
             all_succeeded = False
@@ -396,6 +429,11 @@ class SwarmRuntime:
 
         self._store.update_run(run)
         self._emit_event(run_id, self._make_event("run_completed", data={"status": final_status.value}))
+
+        try:
+            release_at_run_end()
+        except Exception:
+            logger.debug("run-end GPU release skipped", exc_info=True)
 
         # Cleanup cancel event and live callback
         with self._lock:
@@ -469,6 +507,41 @@ class SwarmRuntime:
             run.grounding_data = fetched
             self._store.update_run(run)
 
+    def _ensure_tool_cache_dir(self, run_dir: Path) -> None:
+        """Create per-run tool cache directory (I/O warm-up)."""
+        try:
+            from src.swarm.tool_cache import get_run_tool_cache
+
+            get_run_tool_cache(run_dir)
+        except Exception:
+            logger.debug("tool cache warm-up skipped", exc_info=True)
+
+    def _ensure_artifact_dirs(
+        self,
+        run_dir: Path,
+        agent_map: dict[str, SwarmAgentSpec],
+        layer_task_ids: list[str],
+    ) -> None:
+        """Pre-create artifact directories for upcoming tasks (I/O overlap)."""
+        # Best-effort: we don't have task→agent here without the store; warm all.
+        for agent_id in agent_map:
+            try:
+                (run_dir / "artifacts" / agent_id).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                logger.debug("artifact dir prep skipped for %s", agent_id, exc_info=True)
+    def _build_upstream_for_task(
+        self,
+        task: SwarmTask,
+        task_summaries: dict[str, str],
+    ) -> dict[str, str]:
+        from src.swarm.speed import trim_upstream_summaries
+
+        upstream: dict[str, str] = {}
+        for context_key, source_task_id in task.input_from.items():
+            if source_task_id in task_summaries:
+                upstream[context_key] = task_summaries[source_task_id]
+        return trim_upstream_summaries(upstream)
+
     def _execute_layer(
         self,
         run: SwarmRun,
@@ -481,12 +554,10 @@ class SwarmRuntime:
         include_shell_tools: bool = False,
         grounding_block: str = "",
     ) -> dict[str, WorkerResult]:
-        """Execute all tasks in a single layer **sequentially**, with retry on failure.
+        """Execute all ready tasks in a layer (parallel when policy allows).
 
-        Concurrency is forced to one worker so inactive agents release VRAM /
-        KV-cache before the next task starts. Each task is still retried up to
-        agent_spec.max_retries times if the worker returns status="failed".
-        A "task_retry" event is emitted before each retry.
+        When ``max_workers==1``, prepares the next task's upstream context on a
+        side thread while the current worker runs (I/O overlap, no extra VRAM).
 
         Args:
             run: The SwarmRun being executed.
@@ -507,67 +578,73 @@ class SwarmRuntime:
         def _event_callback(event: SwarmEvent) -> None:
             self._emit_event(run.id, event)
 
-        # Manual executor lifecycle (not `with`) so KeyboardInterrupt and
-        # the layer deadline don't block main on `shutdown(wait=True)` —
-        # `wait=False + cancel_futures=True` lets pending work drop and
-        # the CLI return immediately. Running workers finish naturally.
+        # Filter to dispatchable tasks first (dependency gate + agent resolve).
+        dispatch_plan: list[tuple[str, SwarmTask, SwarmAgentSpec, dict[str, str]]] = []
+        for tid in layer_task_ids:
+            task = task_store.load_task(tid)
+
+            blocked_upstreams: list[tuple[str, str]] = []
+            for dep_id in task.depends_on:
+                try:
+                    dep_task = task_store.load_task(dep_id)
+                except FileNotFoundError:
+                    blocked_upstreams.append((dep_id, "missing"))
+                    continue
+                if dep_task.status != TaskStatus.completed:
+                    blocked_upstreams.append((dep_id, dep_task.status.value))
+
+            if blocked_upstreams:
+                reason = ", ".join(f"{d}={s}" for d, s in blocked_upstreams)
+                blocked_by_ids = [d for d, _ in blocked_upstreams]
+                task_store.update_status(
+                    tid,
+                    TaskStatus.blocked,
+                    error=f"Blocked: upstream not completed ({reason})",
+                    blocked_by=blocked_by_ids,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                self._emit_event(
+                    run.id,
+                    self._make_event(
+                        "task_blocked",
+                        agent_id=task.agent_id,
+                        task_id=tid,
+                        data={"blocked_by": blocked_by_ids, "reason": reason},
+                    ),
+                )
+                continue
+
+            agent_spec = agent_map.get(task.agent_id)
+            if agent_spec is None:
+                results[tid] = WorkerResult(
+                    status="failed",
+                    summary="",
+                    error=f"Agent '{task.agent_id}' not found in preset",
+                )
+                continue
+
+            upstream = self._build_upstream_for_task(task, task_summaries)
+            dispatch_plan.append((tid, task, agent_spec, upstream))
+
+        if not dispatch_plan:
+            return results
+
         executor = ThreadPoolExecutor(max_workers=self._max_workers)
         futures: dict[Future[WorkerResult], str] = {}
-        layer_budget = 0  # seconds — max per-task (retries × timeout) across layer
+        layer_budget = 0
+        prep_executor = ThreadPoolExecutor(max_workers=1)
         try:
-            for tid in layer_task_ids:
-                task = task_store.load_task(tid)
+            # Sequential pipeline: prepare next upstream while current runs.
+            use_pipeline = self._max_workers == 1 and len(dispatch_plan) > 1
+            pending_prep: Future[dict[str, str]] | None = None
 
-                # Dependency-aware gating: without this check, a failed upstream
-                # silently produces an empty task_summaries entry (the worker
-                # upstream loop below only copies summaries that exist) and the
-                # downstream worker runs with no upstream context. For an
-                # investment-committee preset where portfolio_manager
-                # depends_on=["task-risk"], a failed risk_officer would let PM
-                # produce a "decision" with no risk input — which is
-                # safety-critical. Mark blocked and skip dispatch; same-layer
-                # peers with no shared upstream are unaffected.
-                blocked_upstreams: list[tuple[str, str]] = []
-                for dep_id in task.depends_on:
+            for idx, (tid, task, agent_spec, upstream) in enumerate(dispatch_plan):
+                if use_pipeline and pending_prep is not None:
                     try:
-                        dep_task = task_store.load_task(dep_id)
-                    except FileNotFoundError:
-                        blocked_upstreams.append((dep_id, "missing"))
-                        continue
-                    if dep_task.status != TaskStatus.completed:
-                        blocked_upstreams.append((dep_id, dep_task.status.value))
+                        upstream = pending_prep.result(timeout=60)
+                    except Exception:
+                        logger.debug("pipeline upstream prep failed", exc_info=True)
 
-                if blocked_upstreams:
-                    reason = ", ".join(f"{d}={s}" for d, s in blocked_upstreams)
-                    blocked_by_ids = [d for d, _ in blocked_upstreams]
-                    task_store.update_status(
-                        tid,
-                        TaskStatus.blocked,
-                        error=f"Blocked: upstream not completed ({reason})",
-                        blocked_by=blocked_by_ids,
-                        completed_at=datetime.now(timezone.utc).isoformat(),
-                    )
-                    self._emit_event(
-                        run.id,
-                        self._make_event(
-                            "task_blocked",
-                            agent_id=task.agent_id,
-                            task_id=tid,
-                            data={"blocked_by": blocked_by_ids, "reason": reason},
-                        ),
-                    )
-                    continue
-
-                agent_spec = agent_map.get(task.agent_id)
-                if agent_spec is None:
-                    results[tid] = WorkerResult(
-                        status="failed",
-                        summary="",
-                        error=f"Agent '{task.agent_id}' not found in preset",
-                    )
-                    continue
-
-                # Mark task as in_progress
                 task_store.update_status(
                     tid,
                     TaskStatus.in_progress,
@@ -578,11 +655,13 @@ class SwarmRuntime:
                     self._make_event("task_started", agent_id=agent_spec.id, task_id=tid),
                 )
 
-                # Build upstream summaries from input_from mapping
-                upstream: dict[str, str] = {}
-                for context_key, source_task_id in task.input_from.items():
-                    if source_task_id in task_summaries:
-                        upstream[context_key] = task_summaries[source_task_id]
+                if use_pipeline and idx + 1 < len(dispatch_plan):
+                    next_task = dispatch_plan[idx + 1][1]
+                    pending_prep = prep_executor.submit(
+                        self._build_upstream_for_task,
+                        next_task,
+                        task_summaries,
+                    )
 
                 future = executor.submit(
                     self._run_worker_with_retries,
@@ -600,15 +679,8 @@ class SwarmRuntime:
                 per_task_budget = agent_spec.timeout_seconds * (agent_spec.max_retries + 1)
                 layer_budget = max(layer_budget, per_task_budget)
 
-            # Collect results with a hard layer-level deadline — defends against
-            # worker threads stuck in C extensions / blocked I/O that bypass the
-            # in-loop timeout check (issue #42).
-            deadline_buffer = 60
-            layer_deadline = layer_budget + deadline_buffer if layer_budget else None
-
-            try:
-                for future in as_completed(futures, timeout=layer_deadline):
-                    tid = futures[future]
+                if use_pipeline:
+                    # Drain immediately so only one local model is active.
                     try:
                         results[tid] = future.result()
                     except Exception as exc:
@@ -618,26 +690,43 @@ class SwarmRuntime:
                             summary="",
                             error=str(exc),
                         )
-            except FuturesTimeoutError:
-                for pending, tid in futures.items():
-                    if tid in results:
-                        continue
-                    pending.cancel()
-                    logger.error(
-                        "Worker for task %s exceeded layer deadline (%ds)",
-                        tid,
-                        layer_deadline,
-                    )
-                    results[tid] = WorkerResult(
-                        status="timeout",
-                        summary="",
-                        error=f"Worker exceeded layer deadline of {layer_deadline}s",
-                    )
+
+            if not use_pipeline:
+                deadline_buffer = 60
+                layer_deadline = layer_budget + deadline_buffer if layer_budget else None
+                try:
+                    for future in as_completed(futures, timeout=layer_deadline):
+                        tid = futures[future]
+                        try:
+                            results[tid] = future.result()
+                        except Exception as exc:
+                            logger.error("Worker for task %s raised exception", tid, exc_info=True)
+                            results[tid] = WorkerResult(
+                                status="failed",
+                                summary="",
+                                error=str(exc),
+                            )
+                except FuturesTimeoutError:
+                    for pending, tid in futures.items():
+                        if tid in results:
+                            continue
+                        pending.cancel()
+                        logger.error(
+                            "Worker for task %s exceeded layer deadline (%ds)",
+                            tid,
+                            layer_deadline,
+                        )
+                        results[tid] = WorkerResult(
+                            status="timeout",
+                            summary="",
+                            error=f"Worker exceeded layer deadline of {layer_deadline}s",
+                        )
         except KeyboardInterrupt:
             cancel_event.set()
             logger.warning("Swarm layer interrupted — cancelling pending workers")
             raise
         finally:
+            prep_executor.shutdown(wait=False, cancel_futures=True)
             executor.shutdown(wait=False, cancel_futures=True)
 
         return results
@@ -714,7 +803,7 @@ class SwarmRuntime:
                 grounding_block=grounding_block,
                 agent_config=self._agent_config,
             )
-            # Between retries / after the final attempt: drop idle agent tensors.
+            # Soft/hard release per SWARM_VRAM_MODE — not a forced unload every time.
             try:
                 from src.providers.memory_mgmt import release_gpu_memory
 
