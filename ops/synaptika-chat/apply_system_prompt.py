@@ -42,33 +42,42 @@ def main() -> None:
             }
             mid = "synaptika-chat-auto"
             existing = cur.execute("SELECT id FROM model WHERE id=?", (mid,)).fetchone()
+            # base_model_id MUST be NULL for in-place override of connection model
             payload = {
                 "id": mid,
                 "user_id": "",
-                "base_model_id": mid,
+                "base_model_id": None,
                 "name": "Synaptika Chat Auto",
                 "meta": json.dumps(meta),
                 "params": json.dumps(params),
-                "access_control": None,
                 "is_active": True,
             }
+            meta["defaultFeatureIds"] = ["web_search"]
+            payload["meta"] = json.dumps(meta)
             # Adapt to available columns
             if existing:
-                sets = []
-                vals = []
-                for k, v in payload.items():
-                    if k in cols and k != "id":
-                        sets.append(f"{k}=?")
-                        vals.append(v)
-                vals.append(mid)
-                cur.execute(f"UPDATE model SET {', '.join(sets)} WHERE id=?", vals)
-            else:
-                use_cols = [c for c in payload if c in cols]
                 cur.execute(
-                    f"INSERT INTO model ({', '.join(use_cols)}) VALUES ({', '.join('?' for _ in use_cols)})",
-                    [payload[c] for c in use_cols],
+                    """
+                    UPDATE model
+                    SET name=?, base_model_id=NULL, meta=?, params=?, is_active=1
+                    WHERE id=?
+                    """,
+                    (
+                        payload["name"],
+                        payload["meta"],
+                        payload["params"],
+                        mid,
+                    ),
                 )
-            print("model_prompt_set", mid)
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO model (id, user_id, base_model_id, name, meta, params, is_active, updated_at, created_at)
+                    VALUES (?, '', NULL, ?, ?, ?, 1, strftime('%s','now'), strftime('%s','now'))
+                    """,
+                    (mid, payload["name"], payload["meta"], payload["params"]),
+                )
+            print("model_prompt_set", mid, "base_model_id=NULL")
 
     # Also stash on user settings as system prompt default if key exists
     users = cur.execute("SELECT id, settings FROM user").fetchall()
