@@ -38,7 +38,7 @@ OLLAMA_KEY = (
 OLLAMA_BASE = os.environ.get(
     "OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"
 ).rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_DEFAULT_MODEL", "deepseek-v4-flash")
+OLLAMA_MODEL = os.environ.get("OLLAMA_DEFAULT_MODEL", "gemma4:31b")
 
 OPENROUTER_KEY = (
     os.environ.get("OPENROUTER_API_KEY", "").strip()

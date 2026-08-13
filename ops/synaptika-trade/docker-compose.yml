@@ -26,7 +26,7 @@ services:
       - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
       - OLLAMA_CLOUD_BASE_URL=${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}
-      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-deepseek-v4-flash}
+      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-gemma4:31b}
       # OpenRouter = last-resort (also accepts OPENAI_API_KEY OWUI naming)
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -74,7 +74,7 @@ services:
       - OPENAI_API_KEYS=synaptika-proxy;${OPENAI_API_KEY:-};${OLLAMA_API_KEY:-}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
       - OLLAMA_CLOUD_BASE_URL=${OLLAMA_CLOUD_BASE_URL:-https://ollama.com/v1}
-      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-deepseek-v4-flash}
+      - OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-gemma4:31b}
       - LLM_PROXY_MODEL=${LLM_PROXY_MODEL:-synaptika-auto}
       - LLM_PROXY_BASE_URL=http://llm-proxy:4000/v1
       - OPS_API_KEY=${OPS_API_KEY:-}
