@@ -655,8 +655,10 @@ def _maybe_tg_mode(doc: dict, mode: str, reason: str, eq: float) -> None:
     if now - last < cooldown:
         return
     try:
-        from telegram_notify_prefs import tg_api, load_env, filter_keyboard
+        from telegram_notify_prefs import tg_api, load_env, filter_keyboard, should_notify
 
+        if not should_notify("vibe"):
+            return
         chat = load_env().get("TELEGRAM_CHAT_ID")
         if not chat:
             return

@@ -1123,16 +1123,39 @@ def detect_regime() -> dict[str, Any]:
     last = closes[-1]
     atr = atr_pct(kl)
     if e12 is None or e26 is None or s50 is None:
-        return {"regime": "chop", "btc_chg24": chg24, "atr": atr, "last": last}
-    bullish = e12 > e26 and last > s50 and chg24 > -1.5
-    bearish = e12 < e26 and last < s50 and chg24 < -1.0
-    if bullish:
-        regime = "bull"
-    elif bearish:
-        regime = "bear"
-    else:
         regime = "chop"
-    return {"regime": regime, "btc_chg24": chg24, "atr": atr, "last": last}
+    else:
+        bullish = e12 > e26 and last > s50 and chg24 > -1.5
+        bearish = e12 < e26 and last < s50 and chg24 < -1.0
+        if bullish:
+            regime = "bull"
+        elif bearish:
+            regime = "bear"
+        else:
+            regime = "chop"
+
+    openbb: dict[str, Any] = {}
+    try:
+        import openbb_mcp_client as obb
+
+        openbb = obb.build_market_intel(force=False)
+        bias = str(openbb.get("bias") or "neutral")
+        # OpenBB MCP can nudge chop → bull/bear when Binance tape is mixed
+        if regime == "chop":
+            if bias in ("risk_on", "mild_on") and chg24 > -0.5:
+                regime = "bull"
+            elif bias in ("risk_off", "mild_off") and chg24 < 0.5:
+                regime = "bear"
+    except Exception as exc:  # noqa: BLE001
+        openbb = {"ok": False, "error": str(exc)[:160]}
+
+    return {
+        "regime": regime,
+        "btc_chg24": chg24,
+        "atr": atr,
+        "last": last,
+        "openbb": openbb,
+    }
 
 
 def analyze_symbol(symbol: str, btc_chg24: float, regime: str) -> dict[str, Any] | None:
@@ -1242,10 +1265,21 @@ def analyze_symbol(symbol: str, btc_chg24: float, regime: str) -> dict[str, Any]
 
 def rank_candidates(regime_info: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    openbb = regime_info.get("openbb") or {}
+    try:
+        delta = float(openbb.get("score_delta") or 0.0)
+    except (TypeError, ValueError):
+        delta = 0.0
+    bias = str(openbb.get("bias") or "neutral")
     for s in UNIVERSE:
         row = analyze_symbol(s, float(regime_info["btc_chg24"]), regime_info["regime"])
-        if row:
-            rows.append(row)
+        if not row:
+            continue
+        if delta:
+            row["score"] = float(row["score"]) + delta
+            row["reasons"] = list(row.get("reasons") or []) + [f"openbb_{bias}"]
+            row["openbb_delta"] = delta
+        rows.append(row)
     rows.sort(key=lambda r: r["score"], reverse=True)
     return rows
 
@@ -2268,6 +2302,27 @@ def tick() -> None:
             tr.phase("regime_fail", exc=str(exc)[:200])
 
         state["regime"] = regime_info["regime"]
+        openbb = regime_info.get("openbb") or {}
+        if openbb:
+            state["openbb_intel"] = {
+                "bias": openbb.get("bias"),
+                "score_delta": openbb.get("score_delta"),
+                "btc_chg_pct": openbb.get("btc_chg_pct"),
+                "ts": openbb.get("ts"),
+                "ok": openbb.get("ok"),
+                "headlines": (openbb.get("headlines") or [])[:3],
+            }
+            log(
+                f"OPENBB bias={openbb.get('bias')} delta={openbb.get('score_delta')} "
+                f"btc={openbb.get('btc_chg_pct')} ok={openbb.get('ok')} "
+                f"err={openbb.get('error') or openbb.get('errors')}"
+            )
+            tr.phase(
+                "openbb",
+                bias=openbb.get("bias"),
+                delta=openbb.get("score_delta"),
+                ok=openbb.get("ok"),
+            )
         save_state(state)
         log(
             f"REGIME {regime_info['regime']} btc24={regime_info['btc_chg24']:+.2f}% "

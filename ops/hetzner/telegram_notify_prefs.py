@@ -16,36 +16,46 @@ ENV_PATH = HOME / ".env"
 PREFS_PATH = HOME / "telegram_notify_prefs.json"
 DEDUPE_PATH = HOME / "telegram_send_dedupe.json"
 
-# mode: vibe | scalp15 | fb | all
-# "scalper" kept as alias → scalp15 (ETH scalper removed)
+# mode: vibe | fb | all | hermes
+# legacy scalp15/scalper accepted but remapped away (bots removed)
 DEFAULT_MODE = "all"
-VALID_MODES = frozenset({"vibe", "scalp15", "scalper", "fb", "all", "both"})
+VALID_MODES = frozenset({"vibe", "scalp15", "scalper", "fb", "all", "both", "hermes"})
 DEDUPE_WINDOW_SEC = 90
 
-BTN_VIBE = "Solo Binance v6"
-BTN_SCALP15 = "Solo Alpaca scalp15"
-BTN_SCALPER = BTN_SCALP15  # legacy alias
+BTN_VIBE = "Solo Binance / Vibe"
+BTN_HERMES = "OpenBB → Vibe (intel)"
 BTN_FB = "Solo clientes FB"
-BTN_ALL = "Todos (Binance+Alpaca15+FB)"
+BTN_ALL = "Todos (Vibe + FB + OpenBB)"
 BTN_SALES_TEST = "Probar Messenger sales"
 BTN_SALES_EXIT = "Salir Messenger sales"
 # legacy button text still accepted
+BTN_SCALP15 = "Solo Alpaca scalp15"  # legacy; remaps to vibe
+BTN_SCALPER = BTN_SCALP15
 BTN_BOTH_LEGACY = "Ambas (Vibe + FB)"
 BTN_SCALPER_LEGACY = "Solo Scalper"
+BTN_HERMES_LEGACY = "Modo Hermes (research)"
 
 BUTTON_TO_MODE = {
     BTN_VIBE: "vibe",
-    BTN_SCALP15: "scalp15",
-    BTN_SCALPER_LEGACY: "scalp15",
+    BTN_HERMES: "hermes",
+    BTN_HERMES_LEGACY: "hermes",
+    BTN_SCALP15: "vibe",
+    BTN_SCALPER_LEGACY: "vibe",
     "Solo Vibe trading": "vibe",
-    "Solo Scalper": "scalp15",
+    "Solo Binance v6": "vibe",
+    "Solo Scalper": "vibe",
     "Todos (Vibe+Scalper+FB)": "all",
+    "Todos (Binance+Alpaca15+FB)": "all",
+    "Todos (Vibe + FB + Hermes)": "all",
     BTN_FB: "fb",
     BTN_ALL: "all",
     BTN_BOTH_LEGACY: "all",
     "vibe": "vibe",
-    "scalper": "scalp15",
-    "scalp15": "scalp15",
+    "hermes": "hermes",
+    "research": "hermes",
+    "openbb": "hermes",
+    "scalper": "vibe",
+    "scalp15": "vibe",
     "fb": "fb",
     "ambas": "all",
     "both": "all",
@@ -71,9 +81,10 @@ def _normalize_mode(mode: str) -> str:
     mode = (mode or DEFAULT_MODE).lower().strip()
     if mode == "both":
         return "all"
-    if mode == "scalper":
-        return "scalp15"
-    if mode in ("vibe", "scalp15", "fb", "all"):
+    # Removed bots: scalp15/scalper → vibe
+    if mode in ("scalper", "scalp15"):
+        return "vibe"
+    if mode in ("vibe", "fb", "all", "hermes"):
         return mode
     return DEFAULT_MODE
 
@@ -120,20 +131,17 @@ def set_sales_test(enabled: bool) -> dict:
 
 
 def should_notify(channel: str) -> bool:
-    """channel: 'vibe' | 'scalp15' | 'alpaca' | 'fb' (+ legacy 'scalper'→scalp15).
+    """channel: 'vibe' | 'fb' | 'hermes' (+ legacy scalp15/alpaca → vibe).
 
-    - vibe: Binance smart-fast-v6 fills + digests
-    - scalp15: Alpaca 15m momentum scalper
-    - alpaca: treated as vibe (core Alpaca paper) unless filtered separately later
+    - vibe: Binance / Vibe digests
+    - hermes: Hermes research / OpenBB digests
     - fb: Synaptica client appointments
     """
     ch = (channel or "").lower().strip()
-    if ch == "scalper":
-        ch = "scalp15"
-    if ch == "alpaca":
+    if ch in ("scalper", "scalp15", "alpaca"):
         ch = "vibe"
     # While owner is testing Messenger sales in this chat, hush trading digests.
-    if is_sales_test() and ch in ("vibe", "scalp15"):
+    if is_sales_test() and ch in ("vibe", "hermes"):
         print("TG_SALES_TEST_SKIP channel=", channel)
         return False
     mode = load_prefs().get("mode") or DEFAULT_MODE
@@ -235,7 +243,7 @@ def filter_keyboard() -> dict:
     return {
         "keyboard": [
             [{"text": BTN_VIBE}],
-            [{"text": BTN_SCALP15}],
+            [{"text": BTN_HERMES}],
             [{"text": BTN_FB}],
             [{"text": BTN_ALL}],
             [{"text": BTN_SALES_TEST}],
@@ -248,10 +256,11 @@ def filter_keyboard() -> dict:
 def mode_label(mode: str) -> str:
     mode = _normalize_mode(mode)
     return {
-        "vibe": "Solo avisos Binance v6 (+ Alpaca core digests)",
-        "scalp15": "Solo avisos Alpaca scalp15 (15m)",
-        "scalper": "Solo avisos Alpaca scalp15 (15m)",
+        "vibe": "Solo avisos Binance / Vibe",
+        "hermes": "Solo avisos OpenBB→Vibe intel",
+        "scalp15": "Solo avisos Binance / Vibe",
+        "scalper": "Solo avisos Binance / Vibe",
         "fb": "Solo avisos de clientes FB / citas",
-        "all": "Todos (Binance + Alpaca scalp15 + FB)",
-        "both": "Todos (Binance + Alpaca scalp15 + FB)",
+        "all": "Todos (Vibe + FB + OpenBB)",
+        "both": "Todos (Vibe + FB + OpenBB)",
     }.get(mode, mode)

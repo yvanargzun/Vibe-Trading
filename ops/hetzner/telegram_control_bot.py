@@ -2,17 +2,16 @@
 """Telegram control: filter keyboard + on-demand strategy charts.
 
 Commands (natural language or slash; ignore notify filter):
-  binance / v6           → chart Binance smart-fast-v6
-  alpaca / paper         → chart Alpaca core (canonical_v2)
-  scalp15 / 15m          → chart Alpaca scalp15 momentum
-  estado                 → charts Binance + Alpaca + scalp15
+  binance / v6 / vibe    → chart / digest Binance-Vibe
+  hermes / research      → Hermes+OpenBB research status
+  estado                 → panorama Vibe + Hermes
+  filtro                 → teclado de avisos
 """
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,9 +20,9 @@ from pathlib import Path
 from telegram_notify_prefs import (
     BTN_ALL,
     BTN_FB,
+    BTN_HERMES,
     BTN_SALES_EXIT,
     BTN_SALES_TEST,
-    BTN_SCALP15,
     BTN_VIBE,
     BUTTON_TO_MODE,
     filter_keyboard,
@@ -40,22 +39,22 @@ from telegram_notify_prefs import (
 HOME = Path("/root/.vibe-trading")
 ALPACA = Path("/root/.alpaca-paper")
 ALPACA_SCALP15 = Path("/root/.alpaca-scalp15")
+OPENBB_INTEL = HOME / "openbb_market_intel.json"
 PREFS_PORT = 8897
 DEFAULT_MESSENGER_URL = "https://synaptika-messengerfb.onrender.com"
 HELP_TEXT = (
-    "Comandos (resumen + gráfica):\n"
-    "• binance / v6           — Binance smart-fast-v6\n"
-    "• alpaca                 — Alpaca paper core\n"
-    "• scalp15 / 15m          — Alpaca scalp15 (momentum 15m)\n"
-    "• estado                 — los 3 panoramas\n\n"
-    "Atajos: /binance  /alpaca  /scalp15  /estado\n"
-    "Filtro de avisos: /filtro\n\n"
+    "Comandos:\n"
+    "• binance / v6 / vibe    — estado Binance / Vibe\n"
+    "• hermes / openbb        — OpenBB MCP → Vibe (intel de mercado)\n"
+    "• estado                 — panorama Vibe + OpenBB\n"
+    "• /filtro                — teclado de avisos\n\n"
+    "OpenBB MCP alimenta al bot de trade Vibe (no chat Hermes).\n\n"
     "Probar ventas:\n"
     f"• {BTN_SALES_TEST} — chat Messenger sales\n"
     f"• {BTN_SALES_EXIT} — vuelve a trading\n\n"
     "Botones filtro:\n"
     f"• {BTN_VIBE}\n"
-    f"• {BTN_SCALP15}\n"
+    f"• {BTN_HERMES}\n"
     f"• {BTN_FB}\n"
     f"• {BTN_ALL}"
 )
@@ -87,7 +86,7 @@ def _norm(text: str) -> str:
 
 
 def detect_intent(text: str) -> str | None:
-    """Return vibe|alpaca|scalp15|estado|help|filtro or None."""
+    """Return vibe|hermes|estado|help|filtro or None."""
     n = _norm(text)
     if not n:
         return None
@@ -103,7 +102,20 @@ def detect_intent(text: str) -> str | None:
     ):
         return "estado"
 
-    # scalp15 before bare "alpaca" / "scalp"
+    if any(
+        k in bare
+        for k in (
+            "hermes",
+            "research",
+            "openbb",
+            "investig",
+            "/hermes",
+            "/research",
+        )
+    ) or bare in ("hermes", "research"):
+        return "hermes"
+
+    # legacy scalp/alpaca → vibe
     if any(
         k in bare
         for k in (
@@ -113,20 +125,13 @@ def detect_intent(text: str) -> str | None:
             "15 m",
             "momentum 15",
             "/scalp15",
-        )
-    ) or bare in ("s15", "sc15"):
-        return "scalp15"
-
-    if any(
-        k in bare
-        for k in (
             "alpaca",
             "paper trading",
             "alpaca paper",
             "canonical",
         )
-    ) and "scalp15" not in bare and "15m" not in bare:
-        return "alpaca"
+    ) or bare in ("s15", "sc15"):
+        return "vibe"
 
     if any(
         k in bare
@@ -142,7 +147,6 @@ def detect_intent(text: str) -> str | None:
     ) or bare in ("binance", "vibe", "trading"):
         return "vibe"
 
-    # retired eth scalper → redirect tip via help-ish
     if any(k in bare for k in ("eth scalp", "/eth", "scalper eth")) or bare in (
         "eth",
         "scalper",
@@ -150,9 +154,70 @@ def detect_intent(text: str) -> str | None:
         "/scalper",
         "/scalp",
     ):
-        return "retired_eth"
+        return "vibe"
 
     return None
+
+
+def build_hermes_digest() -> str:
+    """Status: OpenBB MCP → Vibe autotrade (direct)."""
+    lines = ["[OpenBB → Vibe] Intel de mercado", ""]
+    try:
+        import openbb_mcp_client as obb
+
+        intel = obb.build_market_intel(force=False)
+    except Exception as exc:  # noqa: BLE001
+        intel = {}
+        lines.append(f"Cliente OpenBB error: {exc}")
+    if not intel and OPENBB_INTEL.exists():
+        try:
+            intel = json.loads(OPENBB_INTEL.read_text(encoding="utf-8"))
+        except Exception:
+            intel = {}
+
+    if intel:
+        age = ""
+        try:
+            age_s = int(time.time() - float(intel.get("ts") or 0))
+            age = f" · hace {age_s}s"
+        except Exception:
+            pass
+        lines.extend(
+            [
+                f"OK: {intel.get('ok')}{age}",
+                f"Bias: {intel.get('bias')} · score_delta={intel.get('score_delta')}",
+                f"BTC ventana: {intel.get('btc_chg_pct')}% · ETH: {intel.get('eth_chg_pct')}%",
+                f"Fuente: {intel.get('source') or 'openbb-mcp'} → vibe-autotrade",
+            ]
+        )
+        heads = intel.get("headlines") or []
+        if heads:
+            lines.append("News:")
+            for h in heads[:4]:
+                lines.append(f"• {h}")
+        errs = intel.get("errors") or intel.get("error")
+        if errs:
+            lines.append(f"Notas: {errs}")
+    else:
+        lines.append("(sin intel todavía — espera un tick de vibe-autotrade)")
+
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen("http://127.0.0.1:8100/mcp", timeout=5) as r:  # noqa: S310
+            code = getattr(r, "status", 200)
+        lines.append(f"OpenBB MCP: up (HTTP {code})")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"OpenBB MCP: down ({exc})")
+
+    lines.extend(
+        [
+            "",
+            "Flujo: OpenBB MCP → openbb_mcp_client → vibe_autotrade (scores/regime).",
+            "Hermes ya no intermedia research de trading.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _pct(a: float, b: float) -> float:
@@ -657,10 +722,9 @@ def clear_old_ui(chat_id: str, *, force_send: bool = False) -> None:
         "setMyCommands",
         {
             "commands": [
-                {"command": "estado", "description": "3 gráficas: Binance + Alpaca + scalp15"},
-                {"command": "binance", "description": "Gráfica Binance v6"},
-                {"command": "alpaca", "description": "Gráfica Alpaca core paper"},
-                {"command": "scalp15", "description": "Gráfica Alpaca scalp15 15m"},
+                {"command": "estado", "description": "Panorama Vibe + Hermes"},
+                {"command": "binance", "description": "Estado Binance / Vibe"},
+                {"command": "hermes", "description": "Hermes research + OpenBB"},
                 {"command": "sales", "description": "Probar Messenger sales"},
                 {"command": "trading", "description": "Salir de Messenger sales"},
                 {"command": "filtro", "description": "Ver/cambiar filtro de avisos"},
@@ -704,6 +768,15 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
         proxy_to_sales_bot(chat_id, text=raw, first_name=first_name)
         return
 
+    # Hermes button: show OpenBB→Vibe intel (no chat proxy)
+    if raw == BTN_HERMES or low in ("/hermes", "hermes", "modo hermes", "research", "openbb"):
+        save_prefs("hermes")
+        send_owner(
+            chat_id,
+            f"Filtro guardado: {mode_label('hermes')}\n\n{build_hermes_digest()}",
+        )
+        return
+
     if raw in BUTTON_TO_MODE or low in BUTTON_TO_MODE:
         mode = BUTTON_TO_MODE.get(raw) or BUTTON_TO_MODE[low]
         save_prefs(mode)
@@ -711,7 +784,7 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
             chat_id,
             f"Filtro guardado: {mode_label(mode)}\n"
             "A partir de ahora solo te mando esa parte.\n"
-            "(Comandos /binance /alpaca /scalp15 /estado siguen siempre.)",
+            "(Comandos /binance /hermes /estado siguen siempre.)",
         )
         return
 
@@ -726,9 +799,17 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
         save_prefs("vibe")
         send_owner(chat_id, f"Filtro guardado: {mode_label('vibe')}")
         return
+    if bare in ("solo_hermes", "filtro_hermes"):
+        save_prefs("hermes")
+        send_owner(chat_id, f"Filtro guardado: {mode_label('hermes')}")
+        return
     if bare in ("solo_scalp15", "filtro_scalp15", "solo_scalper", "filtro_scalper"):
-        save_prefs("scalp15")
-        send_owner(chat_id, f"Filtro guardado: {mode_label('scalp15')}")
+        save_prefs("vibe")
+        send_owner(
+            chat_id,
+            "Alpaca/scalp15 ya no corre. Filtro → Vibe.\n"
+            f"{mode_label('vibe')}",
+        )
         return
     if bare in ("solo_fb", "filtro_fb", "fb"):
         if bare == "fb":
@@ -751,23 +832,20 @@ def handle_text(chat_id: str, text: str, *, first_name: str | None = None) -> No
         clear_old_ui(chat_id, force_send=True)
         return
     if intent == "estado":
-        send_estado_charts(chat_id)
+        try:
+            send_strategy_chart(chat_id, kind="vibe", caption=build_vibe_digest())
+        except Exception:
+            send_owner(chat_id, build_vibe_digest())
+        send_owner(chat_id, build_hermes_digest())
+        return
+    if intent == "hermes":
+        send_owner(chat_id, build_hermes_digest())
         return
     if intent == "vibe":
-        send_strategy_chart(chat_id, kind="vibe", caption=build_vibe_digest())
-        return
-    if intent == "scalp15":
-        send_strategy_chart(chat_id, kind="scalp15", caption=build_scalp15_digest())
-        return
-    if intent == "alpaca":
-        send_strategy_chart(chat_id, kind="alpaca", caption=build_alpaca_digest())
-        return
-    if intent == "retired_eth":
-        send_owner(
-            chat_id,
-            "El ETH scalper de Binance ya no existe.\n"
-            "Usa /scalp15 para el nuevo bot Alpaca 15m, o /binance para Spot v6.",
-        )
+        try:
+            send_strategy_chart(chat_id, kind="vibe", caption=build_vibe_digest())
+        except Exception:
+            send_owner(chat_id, build_vibe_digest())
         return
 
     # Ignore other chatter
@@ -798,6 +876,7 @@ class PrefsHandler(BaseHTTPRequestHandler):
                     "sales_test": bool(prefs.get("sales_test")),
                     "fb": should_notify("fb"),
                     "vibe": should_notify("vibe"),
+                    "hermes": should_notify("hermes"),
                     "scalp15": should_notify("scalp15"),
                     "scalper": should_notify("scalp15"),  # legacy alias
                     "updated_ts": prefs.get("updated_ts"),
