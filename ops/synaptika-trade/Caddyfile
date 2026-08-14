@@ -75,10 +75,20 @@ synaptika-trade.duckdns.org:8443 {
 	}
 }
 
-# synaptika-chat block — general Open WebUI (OmniRoute is the LLM gateway behind it)
-# Single login via Open WebUI session (no HTTP basic_auth — that re-prompts).
+# synaptika-chat block — Open WebUI + OmniRoute API for Synaptika demos/Messenger
+# /omni/* → OmniRoute (OpenAI-compatible /v1). Rest → Open WebUI.
 synaptika-chat.duckdns.org {
 	encode gzip
+	handle /omni* {
+		uri strip_prefix /omni
+		reverse_proxy synaptika-chat-omniroute:20128 {
+			flush_interval -1
+			transport http {
+				read_timeout 10m
+				write_timeout 10m
+			}
+		}
+	}
 	reverse_proxy synaptika-chat-webui:8080 {
 		flush_interval -1
 		transport http {
