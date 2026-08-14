@@ -29,7 +29,7 @@ def main() -> None:
             "code_interpreter": False,
             "citations": True,
         },
-        "defaultFeatureIds": ["web_search"],
+        "defaultFeatureIds": [],
         "suggestion_prompts": [],
     }
     params = {
@@ -38,7 +38,7 @@ def main() -> None:
         # CRITICAL for free models: legacy forces server-side web search
         "function_calling": "legacy",
         "temperature": 0.5,
-        "max_tokens": 2048,
+        "max_tokens": 4096,
     }
 
     con = sqlite3.connect(DB)
@@ -93,12 +93,13 @@ def main() -> None:
             s = {}
         ui = s.setdefault("ui", {})
         if isinstance(ui, dict):
-            ui["webSearch"] = True
+            ui["webSearch"] = False
             ui["streamResponse"] = True
             params_ui = ui.setdefault("params", {})
             if isinstance(params_ui, dict):
                 params_ui["function_calling"] = "legacy"
                 params_ui["stream_response"] = True
+                params_ui["max_tokens"] = 4096
             if prompt:
                 ui["system"] = prompt
         cur.execute("UPDATE user SET settings=? WHERE id=?", (json.dumps(s), uid))
@@ -126,7 +127,7 @@ def main() -> None:
         "models.default_metadata",
         {
             "capabilities": {"web_search": True, "citations": True, "file_upload": True},
-            "defaultFeatureIds": ["web_search"],
+            "defaultFeatureIds": [],
         },
     )
 

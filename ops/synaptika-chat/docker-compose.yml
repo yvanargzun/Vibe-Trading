@@ -1,8 +1,6 @@
-# Synaptika Chat — general Open WebUI + OmniRoute gateway
+# Synaptika Chat — Open WebUI + OmniRoute (stability-focused)
 # Joins synaptika-trade network; HTTPS via trade Caddy
 services:
-  # OmniRoute — OpenAI-compatible multi-provider gateway
-  # https://github.com/diegosouzapw/OmniRoute
   omniroute:
     image: diegosouzapw/omniroute:latest
     container_name: synaptika-chat-omniroute
@@ -12,8 +10,8 @@ services:
       - PORT=20128
       - HOSTNAME=0.0.0.0
       - DATA_DIR=/app/data
-      - OMNIROUTE_MEMORY_MB=${OMNIROUTE_MEMORY_MB:-384}
-      - NODE_OPTIONS=--max-old-space-size=${OMNIROUTE_MEMORY_MB:-384}
+      - OMNIROUTE_MEMORY_MB=${OMNIROUTE_MEMORY_MB:-320}
+      - NODE_OPTIONS=--max-old-space-size=${OMNIROUTE_MEMORY_MB:-320}
       - INITIAL_PASSWORD=${OMNIROUTE_INITIAL_PASSWORD:-changeme-omniroute}
       - OMNIROUTE_WS_BRIDGE_SECRET=${OMNIROUTE_WS_BRIDGE_SECRET:-}
       - API_KEY_SECRET=${OMNIROUTE_API_KEY_SECRET:-}
@@ -21,14 +19,14 @@ services:
       - STORAGE_ENCRYPTION_KEY=${OMNIROUTE_STORAGE_ENCRYPTION_KEY:-}
       - REQUIRE_API_KEY=${OMNIROUTE_REQUIRE_API_KEY:-false}
       - AUTH_COOKIE_SECURE=true
-      # Public origin for dashboard links (dedicated host if DuckDNS allows it)
       - NEXT_PUBLIC_BASE_URL=${OMNIROUTE_PUBLIC_URL:-https://synaptika-omni.duckdns.org}
       - BASE_URL=http://omniroute:20128
       - REDIS_URL=redis://omniroute-redis:6379
-      # Seed API-key providers (OmniRoute pattern: {provider_id}_API_KEY)
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}}
       - GOOGLE_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Prefer emitting answer text over long reasoning stalls
+      - OMNIROUTE_AUTO_FREE_FALLBACK_TO_FULL_POOL=true
     volumes:
       - omniroute_data:/app/data
     ports:
@@ -37,21 +35,23 @@ services:
       - omniroute-redis
     networks:
       - synaptika
-    mem_limit: 768m
+    mem_limit: 720m
 
   omniroute-redis:
     image: redis:7-alpine
     container_name: synaptika-chat-omniroute-redis
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "48mb", "--maxmemory-policy", "allkeys-lru"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "32mb", "--maxmemory-policy", "allkeys-lru"]
     networks:
       - synaptika
-    mem_limit: 64m
+    mem_limit: 48m
 
+  # Kept as offline emergency fallback (not wired into OWUI by default)
   chat-llm-proxy:
     build: ./llm_proxy
     container_name: synaptika-chat-llm-proxy
     restart: unless-stopped
+    profiles: ["fallback"]
     environment:
       - LLM_PROXY_MODEL=${LLM_PROXY_MODEL:-synaptika-chat-auto}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
@@ -73,7 +73,8 @@ services:
       - synaptika
 
   chat-webui:
-    image: ghcr.io/open-webui/open-webui:main
+    # Pin version — :main was causing churn on recreate
+    image: ghcr.io/open-webui/open-webui:v0.11.0
     container_name: synaptika-chat-webui
     restart: unless-stopped
     environment:
@@ -89,7 +90,6 @@ services:
       - ENABLE_EVALUATION_ARENA_MODELS=false
       - ENABLE_IMAGE_GENERATION=false
       - ENABLE_RAG_HYBRID_SEARCH=false
-      # Web search (news / current events) — free DuckDuckGo, no API key
       - ENABLE_PERSISTENT_CONFIG=false
       - ENABLE_WEB_SEARCH=true
       - WEB_SEARCH_ENGINE=duckduckgo
@@ -97,20 +97,25 @@ services:
       - WEB_SEARCH_CONCURRENT_REQUESTS=1
       - BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL=true
       - BYPASS_WEB_SEARCH_WEB_LOADER=true
-      # false: use the user message as the search query.
-      # true often rewrites to "... 13 agosto 2026" and DuckDuckGo returns junk.
       - ENABLE_SEARCH_QUERY_GENERATION=false
       - RAG_EMBEDDING_ENGINE=
       - TASK_MODEL=
       - TASK_MODEL_EXTERNAL=
-      # Primary: OmniRoute gateway; fallback: local llm-proxy + direct providers
+      # SINGLE upstream only — multi-URL caused 500+ models + UI flicker
       - OPENAI_API_BASE_URL=http://omniroute:20128/v1
       - OPENAI_API_KEY=${OMNIROUTE_OWUI_API_KEY:-omniroute}
-      - OPENAI_API_BASE_URLS=http://omniroute:20128/v1;http://chat-llm-proxy:4000/v1;${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1};${GROQ_BASE_URL:-https://api.groq.com/openai/v1};${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
-      - OPENAI_API_KEYS=${OMNIROUTE_OWUI_API_KEY:-omniroute};synaptika-chat-proxy;${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}};${GROQ_API_KEY:-};${GEMINI_API_KEY:-}
-      - DEFAULT_MODELS=${DEFAULT_MODELS:-auto/best-free}
-      - DEFAULT_MODEL_PARAMS={"stream_response":true,"temperature":0.5,"max_tokens":2048,"function_calling":"legacy"}
-      - DEFAULT_MODEL_METADATA={"capabilities":{"web_search":true,"citations":true,"file_upload":true},"defaultFeatureIds":["web_search"]}
+      - OPENAI_API_BASE_URLS=http://omniroute:20128/v1
+      - OPENAI_API_KEYS=${OMNIROUTE_OWUI_API_KEY:-omniroute}
+      - ENABLE_BASE_MODELS_CACHE=true
+      - DEFAULT_MODELS=${DEFAULT_MODELS:-auto/chat}
+      - DEFAULT_PINNED_MODELS=auto/chat;auto/fast;auto/best-free
+      - MODEL_ORDER_LIST=["auto/chat","auto/fast","auto/best-free","auto/coding:free"]
+      - DEFAULT_MODEL_PARAMS={"stream_response":true,"temperature":0.4,"max_tokens":2048,"function_calling":"legacy"}
+      - DEFAULT_MODEL_METADATA={"capabilities":{"web_search":true,"citations":true,"file_upload":true},"defaultFeatureIds":[]}
+      # Longer client timeouts so long streams are not cancelled mid-flight
+      - AIOHTTP_CLIENT_TIMEOUT=600
+      - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=30
+      - WEBSOCKET_MANAGER=
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-me-synaptika-chat}
     volumes:
       - open_webui:/app/backend/data
@@ -119,11 +124,13 @@ services:
       - ./apply_system_prompt.py:/srv/apply_system_prompt.py:ro
       - ./fix_web_search_ui.py:/srv/fix_web_search_ui.py:ro
       - ./fix_web_search_legacy.py:/srv/fix_web_search_legacy.py:ro
+      - ./fix_followup_hang.py:/srv/fix_followup_hang.py:ro
+      - ./fix_stability.py:/srv/fix_stability.py:ro
     depends_on:
       - omniroute
-      - chat-llm-proxy
     networks:
       - synaptika
+    mem_limit: 1024m
 
 volumes:
   open_webui:
