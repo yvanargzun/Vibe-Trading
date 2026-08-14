@@ -75,10 +75,19 @@ synaptika-trade.duckdns.org:8443 {
 	}
 }
 
-# synaptika-chat block — general Open WebUI (OpenRouter/Gemini/Groq)
+# synaptika-chat block — general Open WebUI (OmniRoute is the LLM gateway behind it)
 # Single login via Open WebUI session (no HTTP basic_auth — that re-prompts).
 synaptika-chat.duckdns.org {
 	reverse_proxy synaptika-chat-webui:8080 {
+		flush_interval -1
+	}
+}
+
+# OmniRoute dashboard (create DuckDNS host "synaptika-omni" pointing to this VPS).
+# Until DNS exists, use: ssh -L 20128:127.0.0.1:20128 root@46.225.50.87 → http://127.0.0.1:20128
+synaptika-omni.duckdns.org {
+	encode gzip
+	reverse_proxy synaptika-chat-omniroute:20128 {
 		flush_interval -1
 	}
 }

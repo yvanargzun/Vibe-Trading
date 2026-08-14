@@ -1,6 +1,53 @@
-# Synaptika Chat — general Open WebUI
-# Joins synaptika-trade network; HTTPS via trade Caddy (synaptika-chat.duckdns.org)
+# Synaptika Chat — general Open WebUI + OmniRoute gateway
+# Joins synaptika-trade network; HTTPS via trade Caddy
 services:
+  # OmniRoute — OpenAI-compatible multi-provider gateway
+  # https://github.com/diegosouzapw/OmniRoute
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    container_name: synaptika-chat-omniroute
+    restart: unless-stopped
+    stop_grace_period: 40s
+    environment:
+      - PORT=20128
+      - HOSTNAME=0.0.0.0
+      - DATA_DIR=/app/data
+      - OMNIROUTE_MEMORY_MB=${OMNIROUTE_MEMORY_MB:-384}
+      - NODE_OPTIONS=--max-old-space-size=${OMNIROUTE_MEMORY_MB:-384}
+      - INITIAL_PASSWORD=${OMNIROUTE_INITIAL_PASSWORD:-changeme-omniroute}
+      - OMNIROUTE_WS_BRIDGE_SECRET=${OMNIROUTE_WS_BRIDGE_SECRET:-}
+      - API_KEY_SECRET=${OMNIROUTE_API_KEY_SECRET:-}
+      - JWT_SECRET=${OMNIROUTE_JWT_SECRET:-}
+      - STORAGE_ENCRYPTION_KEY=${OMNIROUTE_STORAGE_ENCRYPTION_KEY:-}
+      - REQUIRE_API_KEY=${OMNIROUTE_REQUIRE_API_KEY:-false}
+      - AUTH_COOKIE_SECURE=true
+      # Public origin for dashboard links (dedicated host if DuckDNS allows it)
+      - NEXT_PUBLIC_BASE_URL=${OMNIROUTE_PUBLIC_URL:-https://synaptika-omni.duckdns.org}
+      - BASE_URL=http://omniroute:20128
+      - REDIS_URL=redis://omniroute-redis:6379
+      # Seed API-key providers (OmniRoute pattern: {provider_id}_API_KEY)
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}}
+      - GOOGLE_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      - omniroute_data:/app/data
+    ports:
+      - "127.0.0.1:20128:20128"
+    depends_on:
+      - omniroute-redis
+    networks:
+      - synaptika
+    mem_limit: 768m
+
+  omniroute-redis:
+    image: redis:7-alpine
+    container_name: synaptika-chat-omniroute-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "48mb", "--maxmemory-policy", "allkeys-lru"]
+    networks:
+      - synaptika
+    mem_limit: 64m
+
   chat-llm-proxy:
     build: ./llm_proxy
     container_name: synaptika-chat-llm-proxy
@@ -56,11 +103,12 @@ services:
       - RAG_EMBEDDING_ENGINE=
       - TASK_MODEL=
       - TASK_MODEL_EXTERNAL=
-      - OPENAI_API_BASE_URL=http://chat-llm-proxy:4000/v1
-      - OPENAI_API_KEY=synaptika-chat-proxy
-      - OPENAI_API_BASE_URLS=http://chat-llm-proxy:4000/v1;${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1};${GROQ_BASE_URL:-https://api.groq.com/openai/v1};${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
-      - OPENAI_API_KEYS=synaptika-chat-proxy;${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}};${GROQ_API_KEY:-};${GEMINI_API_KEY:-}
-      - DEFAULT_MODELS=${LLM_PROXY_MODEL:-synaptika-chat-auto}
+      # Primary: OmniRoute gateway; fallback: local llm-proxy + direct providers
+      - OPENAI_API_BASE_URL=http://omniroute:20128/v1
+      - OPENAI_API_KEY=${OMNIROUTE_OWUI_API_KEY:-omniroute}
+      - OPENAI_API_BASE_URLS=http://omniroute:20128/v1;http://chat-llm-proxy:4000/v1;${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1};${GROQ_BASE_URL:-https://api.groq.com/openai/v1};${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      - OPENAI_API_KEYS=${OMNIROUTE_OWUI_API_KEY:-omniroute};synaptika-chat-proxy;${OPENROUTER_API_KEY:-${OPENAI_API_KEY:-}};${GROQ_API_KEY:-};${GEMINI_API_KEY:-}
+      - DEFAULT_MODELS=${DEFAULT_MODELS:-auto/best-free}
       - DEFAULT_MODEL_PARAMS={"stream_response":true,"temperature":0.5,"max_tokens":2048,"function_calling":"legacy"}
       - DEFAULT_MODEL_METADATA={"capabilities":{"web_search":true,"citations":true,"file_upload":true},"defaultFeatureIds":["web_search"]}
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-change-me-synaptika-chat}
@@ -72,12 +120,14 @@ services:
       - ./fix_web_search_ui.py:/srv/fix_web_search_ui.py:ro
       - ./fix_web_search_legacy.py:/srv/fix_web_search_legacy.py:ro
     depends_on:
+      - omniroute
       - chat-llm-proxy
     networks:
       - synaptika
 
 volumes:
   open_webui:
+  omniroute_data:
 
 networks:
   synaptika:
