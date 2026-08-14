@@ -1,0 +1,35 @@
+---
+description: Auto commit and push every completed change set on this branch
+alwaysApply: true
+---
+
+# Auto commit + push
+
+After finishing a coherent set of work (feature, fix, or ops change), **always** create a git commit and push to the current branch without waiting for the user to ask.
+
+## When
+
+- Apply after the task is done and files are saved.
+- One commit per logical change set (not per tiny intermediate edit mid-task).
+- If multiple unrelated areas changed, prefer separate commits then push once.
+
+## How
+
+1. `git status` / `git diff` / recent `git log` (follow repo commit style).
+2. Stage **only** files you changed for this task; exclude secrets (`.env`, keys, credentials).
+3. Commit with a concise message focused on **why** (1–2 sentences).
+4. `git push -u origin HEAD` (or push current tracking branch).
+5. Confirm clean status (or only unrelated leftovers) and report the commit hash.
+
+## Safety (never break these)
+
+- Do **not** update git config.
+- Do **not** force-push (`--force`, `--force-with-lease`) unless the user explicitly asks.
+- Do **not** amend commits already pushed.
+- Do **not** commit `.env`, API keys, tokens, or credential files.
+- Do **not** use `--no-verify` / skip hooks unless the user explicitly asks.
+- Prefer current branch; never push to `main`/`master` unless the user explicitly asks.
+
+## Overrides this repo’s default
+
+This rule **overrides** “only commit when asked”: in this project, commit + push is the default after work completes.
