@@ -1266,19 +1266,36 @@ def analyze_symbol(symbol: str, btc_chg24: float, regime: str) -> dict[str, Any]
 def rank_candidates(regime_info: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     openbb = regime_info.get("openbb") or {}
+    signals = openbb.get("signals") or {}
     try:
-        delta = float(openbb.get("score_delta") or 0.0)
+        delta = float(openbb.get("score_delta") or signals.get("score_delta") or 0.0)
     except (TypeError, ValueError):
         delta = 0.0
+    try:
+        majors_bonus = float(signals.get("majors_bonus") or 0.0)
+        alts_penalty = float(signals.get("alts_penalty") or 0.0)
+    except (TypeError, ValueError):
+        majors_bonus, alts_penalty = 0.0, 0.0
     bias = str(openbb.get("bias") or "neutral")
     for s in UNIVERSE:
         row = analyze_symbol(s, float(regime_info["btc_chg24"]), regime_info["regime"])
         if not row:
             continue
+        adj = delta
+        reasons = list(row.get("reasons") or [])
         if delta:
-            row["score"] = float(row["score"]) + delta
-            row["reasons"] = list(row.get("reasons") or []) + [f"openbb_{bias}"]
-            row["openbb_delta"] = delta
+            reasons.append(f"openbb_{bias}")
+        base = str(row.get("base") or "")
+        if base in MAJORS and majors_bonus:
+            adj += majors_bonus
+            reasons.append("openbb_major")
+        elif base not in MAJORS and alts_penalty:
+            adj -= alts_penalty
+            reasons.append("openbb_alt_pen")
+        if adj:
+            row["score"] = float(row["score"]) + adj
+            row["openbb_delta"] = adj
+        row["reasons"] = reasons
         rows.append(row)
     rows.sort(key=lambda r: r["score"], reverse=True)
     return rows
@@ -1893,6 +1910,7 @@ def select_buy(
     *,
     mode_reason: str = "",
     equity: float = 0.0,
+    openbb: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     ensure_buy_counters(state)
     if int(state.get("buys_today") or 0) >= MAX_BUYS_PER_DAY:
@@ -1913,6 +1931,9 @@ def select_buy(
         return None
     major_buys = int(state.get("major_buys_today") or 0)
     held_majors = sum(1 for a in holdings if a in MAJORS and holdings[a]["usd"] >= 3)
+    signals = (openbb or {}).get("signals") or {}
+    block_alts = bool(signals.get("block_alts"))
+    prefer_majors = bool(signals.get("prefer_majors"))
 
     for row in ranked:
         if row["score"] < min_score:
@@ -1925,6 +1946,10 @@ def select_buy(
         if base in MAJORS and major_buys >= MAX_MAJOR_BUYS_DAY:
             continue
         if held_majors >= 2 and base in MAJORS:
+            continue
+        if block_alts and base not in MAJORS:
+            continue
+        if prefer_majors and base not in MAJORS and row["score"] < min_score + 0.35:
             continue
         if regime == "bear" and base not in ("BTC", "ETH") and row["score"] < min_score + 0.3:
             continue
@@ -2037,6 +2062,26 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
         _trace_skip("buys_full", buys=state.get("buys_today"))
         return False
 
+    openbb = regime_info.get("openbb") or {}
+    signals = openbb.get("signals") or {}
+    if signals.get("hard_block") or signals.get("allow_buys") is False:
+        te.record_skip(
+            "SKIP_OPENBB",
+            bot="v6",
+            detail=f"bias={openbb.get('bias')} conf={openbb.get('confidence')} hard={signals.get('hard_block')}",
+            mode=mode,
+        )
+        _trace_skip(
+            "openbb_block",
+            bias=openbb.get("bias"),
+            confidence=openbb.get("confidence"),
+        )
+        log(
+            f"SKIP_OPENBB bias={openbb.get('bias')} conf={openbb.get('confidence')} "
+            f"hard={signals.get('hard_block')} reasons={openbb.get('reasons')}"
+        )
+        return False
+
     notional = min(ORDER_USD, float(mandate.hard_caps.max_order_notional_usd))
     holdings = sync_positions(state)
     ranked = rank_candidates(regime_info)
@@ -2061,6 +2106,7 @@ def try_buy(state: dict, regime_info: dict[str, Any]) -> bool:
         holdings,
         mode_reason=mode_reason,
         equity=eq_feats,
+        openbb=openbb,
     )
     if not pick:
         te.record_skip(
@@ -2304,23 +2350,36 @@ def tick() -> None:
         state["regime"] = regime_info["regime"]
         openbb = regime_info.get("openbb") or {}
         if openbb:
+            signals = openbb.get("signals") or {}
             state["openbb_intel"] = {
                 "bias": openbb.get("bias"),
+                "confidence": openbb.get("confidence"),
                 "score_delta": openbb.get("score_delta"),
                 "btc_chg_pct": openbb.get("btc_chg_pct"),
+                "btc_12h_pct": openbb.get("btc_12h_pct"),
+                "equity_risk": openbb.get("equity_risk"),
+                "hard_block": signals.get("hard_block"),
+                "allow_buys": signals.get("allow_buys"),
+                "block_alts": signals.get("block_alts"),
+                "reasons": openbb.get("reasons"),
                 "ts": openbb.get("ts"),
                 "ok": openbb.get("ok"),
                 "headlines": (openbb.get("headlines") or [])[:3],
+                "version": openbb.get("version"),
             }
             log(
-                f"OPENBB bias={openbb.get('bias')} delta={openbb.get('score_delta')} "
-                f"btc={openbb.get('btc_chg_pct')} ok={openbb.get('ok')} "
-                f"err={openbb.get('error') or openbb.get('errors')}"
+                f"OPENBB bias={openbb.get('bias')} conf={openbb.get('confidence')} "
+                f"delta={openbb.get('score_delta')} btc1d={openbb.get('btc_chg_pct')} "
+                f"btc12h={openbb.get('btc_12h_pct')} eq={openbb.get('equity_risk')} "
+                f"block={signals.get('hard_block')} ok={openbb.get('ok')} "
+                f"reasons={openbb.get('reasons')}"
             )
             tr.phase(
                 "openbb",
                 bias=openbb.get("bias"),
+                confidence=openbb.get("confidence"),
                 delta=openbb.get("score_delta"),
+                hard_block=signals.get("hard_block"),
                 ok=openbb.get("ok"),
             )
         save_state(state)

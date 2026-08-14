@@ -182,11 +182,17 @@ def build_hermes_digest() -> str:
             age = f" · hace {age_s}s"
         except Exception:
             pass
+        sig = intel.get("signals") or {}
         lines.extend(
             [
-                f"OK: {intel.get('ok')}{age}",
-                f"Bias: {intel.get('bias')} · score_delta={intel.get('score_delta')}",
-                f"BTC ventana: {intel.get('btc_chg_pct')}% · ETH: {intel.get('eth_chg_pct')}%",
+                f"OK: {intel.get('ok')}{age} · v{intel.get('version') or 1}",
+                f"Bias: {intel.get('bias')} · conf={intel.get('confidence')} · delta={intel.get('score_delta')}",
+                f"BTC 1d: {intel.get('btc_chg_pct')}% · 12h: {intel.get('btc_12h_pct')}% · ETH: {intel.get('eth_chg_pct')}%",
+                f"Equity risk: {intel.get('equity_risk')} · news_score: {intel.get('news_score')} "
+                f"· news={intel.get('news_source') or '—'}",
+                f"Signals: allow_buys={sig.get('allow_buys')} hard_block={sig.get('hard_block')} "
+                f"block_alts={sig.get('block_alts')} prefer_majors={sig.get('prefer_majors')}",
+                f"Reasons: {', '.join(intel.get('reasons') or []) or '—'}",
                 f"Fuente: {intel.get('source') or 'openbb-mcp'} → vibe-autotrade",
             ]
         )
@@ -197,7 +203,7 @@ def build_hermes_digest() -> str:
                 lines.append(f"• {h}")
         errs = intel.get("errors") or intel.get("error")
         if errs:
-            lines.append(f"Notas: {errs}")
+            lines.append(f"Notas: {str(errs)[:300]}")
     else:
         lines.append("(sin intel todavía — espera un tick de vibe-autotrade)")
 
