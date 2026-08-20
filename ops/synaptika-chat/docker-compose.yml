@@ -17,7 +17,10 @@ services:
       - API_KEY_SECRET=${OMNIROUTE_API_KEY_SECRET:-}
       - JWT_SECRET=${OMNIROUTE_JWT_SECRET:-}
       - STORAGE_ENCRYPTION_KEY=${OMNIROUTE_STORAGE_ENCRYPTION_KEY:-}
-      - REQUIRE_API_KEY=${OMNIROUTE_REQUIRE_API_KEY:-false}
+      - REQUIRE_API_KEY=${OMNIROUTE_REQUIRE_API_KEY:-true}
+      # Passthrough client key for /v1/* (Render demos/Messenger, OWUI, Hermes)
+      - OMNIROUTE_API_KEY=${OMNIROUTE_GATEWAY_API_KEY:-}
+      - ROUTER_API_KEY=${OMNIROUTE_GATEWAY_API_KEY:-}
       - AUTH_COOKIE_SECURE=true
       - NEXT_PUBLIC_BASE_URL=${OMNIROUTE_PUBLIC_URL:-https://synaptika-omni.duckdns.org}
       - BASE_URL=http://omniroute:20128
@@ -103,9 +106,9 @@ services:
       - TASK_MODEL_EXTERNAL=
       # SINGLE upstream only — multi-URL caused 500+ models + UI flicker
       - OPENAI_API_BASE_URL=http://omniroute:20128/v1
-      - OPENAI_API_KEY=${OMNIROUTE_OWUI_API_KEY:-omniroute}
+      - OPENAI_API_KEY=${OMNIROUTE_GATEWAY_API_KEY:-${OMNIROUTE_OWUI_API_KEY:-}}
       - OPENAI_API_BASE_URLS=http://omniroute:20128/v1
-      - OPENAI_API_KEYS=${OMNIROUTE_OWUI_API_KEY:-omniroute}
+      - OPENAI_API_KEYS=${OMNIROUTE_GATEWAY_API_KEY:-${OMNIROUTE_OWUI_API_KEY:-}}
       - ENABLE_BASE_MODELS_CACHE=true
       - DEFAULT_MODELS=${DEFAULT_MODELS:-auto/chat}
       - DEFAULT_PINNED_MODELS=auto/chat;auto/fast;auto/best-free

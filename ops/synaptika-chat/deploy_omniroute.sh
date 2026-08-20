@@ -25,9 +25,10 @@ ensure_secret OMNIROUTE_API_KEY_SECRET "$(openssl rand -hex 32)"
 ensure_secret OMNIROUTE_JWT_SECRET "$(openssl rand -hex 32)"
 ensure_secret OMNIROUTE_STORAGE_ENCRYPTION_KEY "$(openssl rand -hex 32)"
 ensure_secret OMNIROUTE_MEMORY_MB "384"
-ensure_secret OMNIROUTE_REQUIRE_API_KEY "false"
+ensure_secret OMNIROUTE_REQUIRE_API_KEY "true"
 ensure_secret OMNIROUTE_PUBLIC_URL "https://synaptika-omni.duckdns.org"
-ensure_secret OMNIROUTE_OWUI_API_KEY "omniroute"
+ensure_secret OMNIROUTE_GATEWAY_API_KEY "$(openssl rand -hex 32)"
+ensure_secret OMNIROUTE_OWUI_API_KEY "$(grep '^OMNIROUTE_GATEWAY_API_KEY=' "$SECRETS" | cut -d= -f2-)"
 
 # DuckDNS synaptika-omni → this VPS
 set -a
