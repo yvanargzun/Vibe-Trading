@@ -1,0 +1,11 @@
+node_modules
+.git
+.env
+.env.*
+*.log
+docs/media
+playwright-report
+test-results
+scripts/probe-flow-*-out.txt
+.cursor
+agent-transcripts

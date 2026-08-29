@@ -76,7 +76,9 @@ synaptika-trade.duckdns.org:8443 {
 }
 
 # synaptika-chat block — Open WebUI + OmniRoute API for Synaptika demos/Messenger
-# /omni/* → OmniRoute (OpenAI-compatible /v1). Rest → Open WebUI.
+# /omni/* → OmniRoute (OpenAI-compatible /v1).
+# /m/* → Messenger (strip prefix) until synaptika-messenger.duckdns.org DNS exists.
+# Rest → Open WebUI.
 synaptika-chat.duckdns.org {
 	encode gzip
 	handle /omni* {
@@ -87,6 +89,14 @@ synaptika-chat.duckdns.org {
 				read_timeout 10m
 				write_timeout 10m
 			}
+		}
+	}
+	handle_path /m/* {
+		reverse_proxy synaptika-messenger:8788 {
+			flush_interval -1
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
 		}
 	}
 	handle {
@@ -116,5 +126,27 @@ synaptika-omni.duckdns.org {
 			read_timeout 10m
 			write_timeout 10m
 		}
+	}
+}
+
+# Synaptika demos (ex-Render Synaptika-demos)
+synaptika-demos.duckdns.org {
+	encode gzip
+	reverse_proxy synaptika-demos:4173 {
+		flush_interval -1
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+# Synaptika Messenger / Telegram / booking (ex-Render synaptika-messengerfb)
+synaptika-messenger.duckdns.org {
+	encode gzip
+	reverse_proxy synaptika-messenger:8788 {
+		flush_interval -1
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
 	}
 }

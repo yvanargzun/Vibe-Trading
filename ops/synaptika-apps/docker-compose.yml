@@ -1,0 +1,53 @@
+# Synaptika demos + Messenger on the Trade VPS (replaces Render).
+services:
+  messenger:
+    build:
+      context: ./repo
+      dockerfile: Dockerfile
+    image: synaptika-apps:latest
+    container_name: synaptika-messenger
+    restart: unless-stopped
+    env_file:
+      - secrets.env
+    environment:
+      - PORT=8788
+      - NODE_ENV=production
+      - TRUST_PROXY=1
+      - AI_PROVIDER=omniroute
+      - OMNIROUTE_BASE_URL=http://synaptika-chat-omniroute:20128/v1
+      - OMNIROUTE_MODEL=auto/chat
+      # BOOKING_BASE_URL / DEMOS_BASE_URL / MESSENGER_URL come from secrets.env
+      # (interim: https://synaptika-chat.duckdns.org/m until DuckDNS hosts exist)
+    ports:
+      - "127.0.0.1:8788:8788"
+    networks:
+      - synaptika
+    mem_limit: 384m
+
+  demos:
+    image: synaptika-apps:latest
+    container_name: synaptika-demos
+    restart: unless-stopped
+    depends_on:
+      - messenger
+    env_file:
+      - secrets.env
+    environment:
+      - PORT=4173
+      - NODE_ENV=production
+      - TRUST_PROXY=1
+      - AI_PROVIDER=omniroute
+      - OMNIROUTE_BASE_URL=http://synaptika-chat-omniroute:20128/v1
+      - OMNIROUTE_MODEL=auto/chat
+      # MESSENGER_URL from secrets.env
+    command: ["npx", "vite", "preview", "--host", "0.0.0.0", "--port", "4173"]
+    ports:
+      - "127.0.0.1:4173:4173"
+    networks:
+      - synaptika
+    mem_limit: 384m
+
+networks:
+  synaptika:
+    name: synaptika-trade_default
+    external: true
