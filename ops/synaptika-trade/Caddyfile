@@ -74,3 +74,47 @@ synaptika-trade.duckdns.org:8443 {
 		}
 	}
 }
+
+# synaptika-chat block — Open WebUI + OmniRoute API for Synaptika demos/Messenger
+# /omni/* → OmniRoute (OpenAI-compatible /v1). Rest → Open WebUI.
+synaptika-chat.duckdns.org {
+	encode gzip
+	handle /omni* {
+		uri strip_prefix /omni
+		reverse_proxy synaptika-chat-omniroute:20128 {
+			flush_interval -1
+			transport http {
+				read_timeout 10m
+				write_timeout 10m
+			}
+		}
+	}
+	handle {
+		reverse_proxy synaptika-chat-webui:8080 {
+			flush_interval -1
+			transport http {
+				read_timeout 10m
+				write_timeout 10m
+				dial_timeout 10s
+				keepalive 30s
+			}
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+}
+
+# OmniRoute dashboard (create DuckDNS host "synaptika-omni" pointing to this VPS).
+# Until DNS exists, use: ssh -L 20128:127.0.0.1:20128 root@46.225.50.87 → http://127.0.0.1:20128
+synaptika-omni.duckdns.org {
+	encode gzip
+	reverse_proxy synaptika-chat-omniroute:20128 {
+		flush_interval -1
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+}
